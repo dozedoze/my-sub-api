@@ -193,7 +193,7 @@ th { color: var(--muted); font-weight: 500; }
 .keys-wrap { overflow: auto; min-height: 0; }
 .keys {
   table-layout: fixed;
-  min-width: 920px;
+  min-width: 1040px;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -204,7 +204,7 @@ th { color: var(--muted); font-weight: 500; }
 .keys .c-quota { width: 200px; }
 .keys .c-remain { width: 80px; }
 .keys .c-status { width: 80px; }
-.keys .c-actions { width: 160px; }
+.keys .c-actions { width: 214px; }
 .keys th, .keys td {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -214,6 +214,39 @@ th { color: var(--muted); font-weight: 500; }
 }
 .keys .quota-cell { white-space: normal; overflow: visible; }
 .keys .col-actions { white-space: nowrap; overflow: visible; }
+.keys .col-actions button[aria-expanded] {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.keys .col-actions .chev {
+  display: inline-flex;
+  transition: transform .2s ease;
+}
+.keys .col-actions button[aria-expanded="true"] { border-color: #2f9e75; color: var(--accent); }
+.keys .col-actions button[aria-expanded="true"] .chev { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) {
+  .keys .col-actions .chev { transition: none; }
+}
+.keys tr.recent-row td {
+  background: #10141c;
+  font-variant-numeric: tabular-nums;
+}
+.keys tr.recent-row td:last-child {
+  position: static;
+  right: auto;
+  box-shadow: none;
+}
+.keys tr.recent-head td {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  padding-top: 10px;
+  padding-bottom: 4px;
+}
+.keys tr.recent-row:not(.recent-head) td.c-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .keys .col-actions button { padding: 6px 10px; }
 .keys .col-actions button + button { margin-left: 6px; }
 .keys thead {

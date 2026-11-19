@@ -48,6 +48,8 @@ import {
   secretName,
   stripV1,
   tokensFromUsage,
+  pushRecent,
+  readRecent,
   trimSessionMessages,
   upstreamRestPath,
   vendorGroups,
@@ -619,6 +621,24 @@ test("quota helpers and usage parse", () => {
   );
   assert.equal(views[0].usedTokens, 40);
   assert.equal(views[0].remainingTokens, 60);
+  assert.deepEqual(views[0].recent, []);
+  let recent;
+  for (let i = 0; i < 12; i++) {
+    recent = pushRecent(recent, { at: i + 1, model: "m" + i, provider: "p", tokens: i });
+  }
+  assert.equal(recent.length, 10);
+  assert.equal(recent[0].model, "m11");
+  assert.equal(recent[9].model, "m2");
+  const withRecent = attachUsage(
+    [{ id: "a", name: "n", prefix: "sk-a", enabled: true, createdAt: 1, quotaTokens: 100 }],
+    { a: { used: 40, requests: 2, recent } },
+    1_000_000,
+  );
+  assert.equal(withRecent[0].recent[0].model, "m11");
+  assert.equal(withRecent[0].recent.length, 10);
+  assert.deepEqual(readRecent([{ model: "x" }, { at: 1, model: "ok", provider: "p", tokens: 3 }, null]), [
+    { at: 1, model: "ok", provider: "p", tokens: 3 },
+  ]);
   const acc = { content: "" };
   applyChatSseLine(acc, 'data: {"choices":[{"delta":{"content":"x"}}],"usage":{"total_tokens":9}}');
   assert.equal(acc.content, "x");

@@ -12,7 +12,81 @@ function asKeyView(k) {
     usedTokens: used,
     requestCount: k.requestCount || 0,
     remainingTokens: quota === 0 ? null : Math.max(0, quota - used),
+    recent: Array.isArray(k.recent) ? k.recent : [],
   };
+}
+
+function fmtWhen(at) {
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+
+function callName(c) {
+  if (c.model && c.provider) return c.provider + "/" + c.model;
+  return c.model || c.provider || "未指定";
+}
+
+function recentChevron() {
+  const icon = document.createElement("span");
+  icon.className = "chev";
+  icon.setAttribute("aria-hidden", "true");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", "12");
+  svg.setAttribute("height", "12");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M2.2 4.3 6 8.1l3.8-3.8");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.4");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.append(path);
+  icon.append(svg);
+  return icon;
+}
+
+function recentLine(time, model, tokens, head) {
+  const tr = document.createElement("tr");
+  tr.className = "recent-row" + (head ? " recent-head" : "");
+  tr.hidden = true;
+  const timeTd = document.createElement("td");
+  timeTd.className = "c-time";
+  timeTd.textContent = time;
+  const modelTd = document.createElement("td");
+  modelTd.className = "c-model";
+  modelTd.colSpan = 2;
+  modelTd.textContent = model;
+  modelTd.title = model;
+  const tokenTd = document.createElement("td");
+  tokenTd.className = "c-tokens" + (head ? "" : " mono");
+  tokenTd.colSpan = 2;
+  tokenTd.textContent = tokens;
+  const rest = document.createElement("td");
+  rest.colSpan = 3;
+  tr.append(timeTd, modelTd, tokenTd, rest);
+  return tr;
+}
+
+function recentToggle(calls) {
+  const list = Array.isArray(calls) ? calls.slice(0, 10) : [];
+  if (!list.length) return null;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ghost";
+  btn.append("最近", recentChevron());
+  btn.title = callName(list[0]) + " · " + fmtTokens(list[0].tokens || 0);
+  btn.setAttribute("aria-expanded", "false");
+  const rows = [recentLine("时间", "模型", "token 使用量", true)];
+  for (const c of list) rows.push(recentLine(fmtWhen(c.at), callName(c), fmtTokens(c.tokens || 0), false));
+  btn.onclick = () => {
+    const open = rows[0].hidden;
+    for (const row of rows) row.hidden = !open;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  return { btn, rows };
 }
 
 function withPending(listed) {
@@ -135,11 +209,15 @@ function paintKeyRows(keys) {
         goneIds.add(k.id);
         pendingKeys.delete(k.id);
         tr.remove();
+        for (const row of recent?.rows || []) row.remove();
       });
     };
+    const recent = recentToggle(k.recent);
     td.append(rev, del);
+    if (recent) td.append(recent.btn);
     tr.append(nameTd, prefixTd, provTd, usedTd, quotaTd, remainTd, statusTd, td);
-    tb.appendChild(tr);
+    tb.append(tr);
+    if (recent) tb.append(...recent.rows);
   }
 }
 

@@ -47,6 +47,7 @@ import {
   timingSafeEqualString,
   verifyAdminSession,
   tokensFromUsage,
+  pushRecent,
   trimSessionMessages,
   upstreamRestPath,
   vendorGroups,
@@ -114,10 +115,16 @@ export class QuotaBoard extends DurableObject<Env> {
     return (await this.ctx.storage.get<Meter>(`k:${keyId}`)) ?? { used: 0, requests: 0 };
   }
 
-  async add(keyId: string, providerId: string, tokens: number): Promise<Meter> {
+  async add(keyId: string, providerId: string, tokens: number, model?: string): Promise<Meter> {
     const n = Math.max(0, Math.floor(tokens));
     const cur = await this.peek(keyId);
-    const next = { used: cur.used + n, requests: cur.requests + 1 };
+    const next: Meter = { used: cur.used + n, requests: cur.requests + 1 };
+    // model 缺省是内部分档计费：只累加额度，最近调用原样保留。
+    if (model !== undefined) {
+      next.recent = pushRecent(cur.recent, { at: Date.now(), model, provider: providerId, tokens: n });
+    } else if (cur.recent?.length) {
+      next.recent = cur.recent;
+    }
     await this.ctx.storage.put(`k:${keyId}`, next);
     const p = (await this.ctx.storage.get<Meter>(`p:${providerId}`)) ?? { used: 0, requests: 0 };
     await this.ctx.storage.put(`p:${providerId}`, { used: p.used + n, requests: p.requests + 1 });
@@ -781,6 +788,7 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
           board,
           keyId: issued.id,
           providerId: account.id,
+          model: picked.model,
           estimate: estimateTokens(payload ?? rest),
         },
       });
@@ -833,6 +841,7 @@ async function passthrough(
       board: DurableObjectStub<QuotaBoard>;
       keyId: string;
       providerId: string;
+      model: string;
       estimate: number;
     };
   },
@@ -870,7 +879,7 @@ async function consumeSse(
   stream: ReadableStream<Uint8Array>,
   stub: DurableObjectStub<ChatSession> | undefined,
   prior: ChatMessage[] | undefined,
-  meter: { board: DurableObjectStub<QuotaBoard>; keyId: string; providerId: string; estimate: number },
+  meter: { board: DurableObjectStub<QuotaBoard>; keyId: string; providerId: string; model: string; estimate: number },
 ): Promise<void> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -888,7 +897,7 @@ async function consumeSse(
     if (buf) applyChatSseLine(acc, buf);
     if (stub && prior && acc.content) await stub.save([...prior, { role: "assistant", content: acc.content }]);
     const tokens = acc.tokens ?? meter.estimate + Math.ceil(acc.content.length / 4);
-    await meter.board.add(meter.keyId, meter.providerId, tokens);
+    await meter.board.add(meter.keyId, meter.providerId, tokens, meter.model);
   } catch (err) {
     console.error(JSON.stringify({ message: "session_sse_save", error: err instanceof Error ? err.message : String(err) }));
   }
@@ -899,7 +908,7 @@ async function respondJsonAndSave(
   headers: Headers,
   stub: DurableObjectStub<ChatSession> | undefined,
   prior: ChatMessage[] | undefined,
-  meter: { board: DurableObjectStub<QuotaBoard>; keyId: string; providerId: string; estimate: number },
+  meter: { board: DurableObjectStub<QuotaBoard>; keyId: string; providerId: string; model: string; estimate: number },
 ): Promise<Response> {
   const text = await upstream.text();
   try {
@@ -908,11 +917,11 @@ async function respondJsonAndSave(
       const assistant = assistantFromChatCompletion(json);
       if (assistant) await stub.save([...prior, assistant]);
     }
-    await meter.board.add(meter.keyId, meter.providerId, tokensFromUsage(json) ?? meter.estimate);
+    await meter.board.add(meter.keyId, meter.providerId, tokensFromUsage(json) ?? meter.estimate, meter.model);
   } catch (err) {
     console.error(JSON.stringify({ message: "session_json_save", error: err instanceof Error ? err.message : String(err) }));
     try {
-      await meter.board.add(meter.keyId, meter.providerId, meter.estimate);
+      await meter.board.add(meter.keyId, meter.providerId, meter.estimate, meter.model);
     } catch {
       /* ignore meter failure */
     }

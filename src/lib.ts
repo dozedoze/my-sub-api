@@ -65,16 +65,52 @@ export type KeyPublic = {
   quotaTokens?: number;
 };
 
+export type RecentCall = {
+  at: number;
+  model: string;
+  provider: string;
+  tokens: number;
+};
+
 export type Meter = {
   used: number;
   requests: number;
+  /** 下游这次转发的模型和 token，最新在前，最多 10 条。内部分档计费不写这里。 */
+  recent?: RecentCall[];
 };
+
+export const RECENT_CALL_LIMIT = 10;
+
+export function pushRecent(prev: RecentCall[] | undefined, call: RecentCall): RecentCall[] {
+  return [call, ...(prev ?? [])].slice(0, RECENT_CALL_LIMIT);
+}
+
+export function readRecent(raw: unknown): RecentCall[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RecentCall[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const tokens = nonNegInt(rec.tokens);
+    const at = nonNegInt(rec.at);
+    if (tokens == null || at == null) continue;
+    out.push({
+      at,
+      model: typeof rec.model === "string" ? rec.model : "",
+      provider: typeof rec.provider === "string" ? rec.provider : "",
+      tokens,
+    });
+    if (out.length >= RECENT_CALL_LIMIT) break;
+  }
+  return out;
+}
 
 export type KeyView = KeyPublic & {
   quotaTokens: number;
   usedTokens: number;
   requestCount: number;
   remainingTokens: number | null;
+  recent: RecentCall[];
 };
 
 export const FALLBACK_QUOTA_TOKENS = 1_000_000;
@@ -491,6 +527,7 @@ export function attachUsage(
       usedTokens,
       requestCount,
       remainingTokens: quotaTokens === 0 ? null : Math.max(0, quotaTokens - usedTokens),
+      recent: readRecent(meters[k.id]?.recent),
     };
   });
 }

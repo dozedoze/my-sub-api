@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { adminHtml } from "./admin-ui";
+import faviconSvg from "./admin/favicon.svg";
 import {
   ADMIN_SESSION_COOKIE,
   adminSessionClearCookie,
@@ -14,6 +15,7 @@ import {
   extractToken,
   GatewayError,
   goAllowanceBlocks,
+  isAdminShellPath,
   isGoSubscription,
   joinUrl,
   mintAdminSession,
@@ -22,8 +24,10 @@ import {
   mergeSessionMessages,
   openaiError,
   exposeModels,
+  exposeAutoModel,
   failoverAction,
   parseJsonObject,
+  modelFallback,
   modelAllowed,
   parseModelsResponse,
   parseOpencodeBalance,
@@ -38,6 +42,8 @@ import {
   readCookie,
   resolveSessionId,
   rotateFrom,
+  stickyAccountId,
+  applyUpstreamSticky,
   timingSafeEqualString,
   verifyAdminSession,
   tokensFromUsage,
@@ -50,14 +56,18 @@ import {
   type Provider,
   type UpstreamProbe,
 } from "./lib";
+import { isAutoModel, parseAutoRoute, planAuto, resolveAutoRoute, type AutoRoute } from "./auto";
 import {
   banUpstream,
+  clearAutoModels,
   createIssuedKey,
   deleteIssuedKey,
   listIssuedKeys,
+  loadAutoModels,
   loadUpstreamBans,
   lookupByPlaintext,
   patchIssuedKey,
+  saveAutoModels,
   unbanUpstream,
 } from "./keys";
 
@@ -68,6 +78,24 @@ export class ChatSession extends DurableObject<Env> {
 
   async save(messages: ChatMessage[]): Promise<void> {
     await this.ctx.storage.put("messages", trimSessionMessages(messages));
+  }
+
+  async loadAuto(): Promise<"easy" | "hard" | null> {
+    const tier = await this.ctx.storage.get<string>("auto");
+    return tier === "easy" || tier === "hard" ? tier : null;
+  }
+
+  async saveAuto(tier: "easy" | "hard"): Promise<void> {
+    await this.ctx.storage.put("auto", tier);
+  }
+
+  async loadAutoModel(): Promise<string | null> {
+    const model = await this.ctx.storage.get<string>("autoModel");
+    return typeof model === "string" && model.trim() ? model : null;
+  }
+
+  async saveAutoModel(model: string): Promise<void> {
+    await this.ctx.storage.put("autoModel", model);
   }
 }
 
@@ -155,11 +183,16 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   if (request.method === "GET" && path === "/health") {
     return Response.json({ ok: true }, { headers: corsHeaders() });
   }
+  if (request.method === "GET" && (path === "/favicon.ico" || path === "/favicon.svg")) {
+    return new Response(faviconSvg, {
+      headers: {
+        "content-type": "image/svg+xml; charset=utf-8",
+        "cache-control": "public, max-age=86400",
+      },
+    });
+  }
   if (request.method === "GET" && path === "/") {
     return new Response(landing(url.origin), { headers: { "content-type": "text/html; charset=utf-8" } });
-  }
-  if (request.method === "GET" && path === "/admin") {
-    return new Response(adminHtml(url.origin), { headers: { "content-type": "text/html; charset=utf-8" } });
   }
   if (path.startsWith("/admin/api")) {
     if (request.method === "POST" && path === "/admin/api/logout") {
@@ -178,6 +211,9 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     headers.append("set-cookie", adminSessionSetCookie(await mintAdminSession(env.ADMIN_TOKEN.trim()), request.url));
     return new Response(res.body, { status: res.status, headers });
   }
+  if (request.method === "GET" && isAdminShellPath(path)) {
+    return new Response(adminHtml(url.origin), { headers: { "content-type": "text/html; charset=utf-8" } });
+  }
 
   const rest = upstreamRestPath(path);
   if (!rest) return openaiError(404, "not_found", "Not found");
@@ -188,11 +224,12 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
 }
 
 function landing(origin: string): string {
-  return `<!DOCTYPE html><meta charset="utf-8"><title>my-sub-api</title>
+  return `<!DOCTYPE html><meta charset="utf-8"><title>API 分发</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <body style="font:16px/1.5 system-ui;background:#0b0d12;color:#e8edf7;padding:48px">
-<h1>my-sub-api</h1>
-<p>OpenAI 兼容 API 中转。使用者 Base URL：<code>${origin}/v1</code></p>
-<p><a href="/admin" style="color:#6ee7b7">管理后台</a>（签发 Key）</p>
+<h1>API 分发</h1>
+<p>OpenAI 兼容 API。使用者 Base URL：<code>${origin}/v1</code></p>
+<p><a href="/admin" style="color:#6ee7b7">管理后台</a>（签发分发账号）</p>
 </body>`;
 }
 
@@ -208,6 +245,22 @@ async function requireAdmin(request: Request, env: Env): Promise<boolean> {
   const cookie = readCookie(request.headers.get("cookie"), ADMIN_SESSION_COOKIE);
   if (cookie && (await verifyAdminSession(token, cookie))) return false;
   throw new GatewayError(401, "unauthorized", "Invalid admin token");
+}
+
+async function currentAuto(env: Env): Promise<{ route: AutoRoute; saved: boolean }> {
+  return resolveAutoRoute(await loadAutoModels(env.KEYS));
+}
+
+function readAutoInput(body: unknown): AutoRoute {
+  let route: AutoRoute | null;
+  try {
+    route = parseAutoRoute(body);
+  } catch (err) {
+    if (err instanceof GatewayError) throw new GatewayError(400, "invalid_request", "简单档和复杂档都需要填写");
+    throw err;
+  }
+  if (!route) throw new GatewayError(400, "invalid_request", "简单档和复杂档都需要填写");
+  return route;
 }
 
 async function adminApi(request: Request, env: Env, path: string): Promise<Response> {
@@ -231,15 +284,24 @@ async function adminApi(request: Request, env: Env, path: string): Promise<Respo
             localRequests: meter.requests,
             upstream: null,
             models: [] as string[],
+            catalog: [] as string[],
             blacklist,
           };
         }
-        const [upstream, models] = await Promise.all([probeUpstream(configured), fetchUpstreamModels(configured)]);
-        return { ...p, localUsedTokens: meter.used, localRequests: meter.requests, upstream, models, blacklist };
+        const [upstream, catalog] = await Promise.all([probeUpstream(configured), fetchUpstreamModels(configured)]);
+        const models = catalog.filter((id) => modelAllowed(configured, id));
+        return { ...p, localUsedTokens: meter.used, localRequests: meter.requests, upstream, models, catalog, blacklist };
       }),
     );
+    const picked = await currentAuto(env);
     return Response.json(
-      { providers, defaultProvider: live[0]?.id, defaultQuotaTokens: fallbackQuota },
+      {
+        providers,
+        defaultProvider: live[0]?.id,
+        defaultQuotaTokens: fallbackQuota,
+        auto: picked.route,
+        autoSaved: picked.saved,
+      },
       { headers: corsHeaders() },
     );
   }
@@ -290,6 +352,19 @@ async function adminApi(request: Request, env: Env, path: string): Promise<Respo
       if (!ok) throw new GatewayError(404, "not_found", "Key not found");
       await board.reset(id);
       return Response.json({ deleted: true }, { headers: corsHeaders() });
+    }
+  }
+
+  if (path === "/admin/api/auto") {
+    if (request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      const route = readAutoInput(body);
+      await saveAutoModels(env.KEYS, route);
+      return Response.json({ ...route, saved: true }, { headers: corsHeaders() });
+    }
+    if (request.method === "DELETE") {
+      await clearAutoModels(env.KEYS);
+      return Response.json({ saved: false }, { headers: corsHeaders() });
     }
   }
 
@@ -454,8 +529,10 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
 
   const { live } = loadProviders(env);
   const map = new Map(live.map((p) => [p.id, p]));
-  const blocked = new Set(Object.keys(await loadUpstreamBans(env.KEYS)));
+  const [bans, picked] = await Promise.all([loadUpstreamBans(env.KEYS), currentAuto(env)]);
+  const blocked = new Set(Object.keys(bans));
   const aliases = parseJsonObject(env.MODEL_ALIASES);
+  const autoRoute = picked.route;
   const defaultProvider = live[0]?.id ?? "";
 
   if (rest === "models" && request.method === "GET") {
@@ -465,7 +542,7 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
     const targets = (issued.provider ? [map.get(issued.provider)] : live).filter(
       (p): p is Provider => p != null && !blocked.has(p.id),
     );
-    return listModels(targets);
+    return listModels(targets, Boolean(autoRoute));
   }
 
   let model: string | undefined;
@@ -482,20 +559,32 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
     if ("model" in payload && typeof payload.model === "string") model = payload.model;
   }
 
-  const picked = pickUpstream({
-    requestedModel: model,
-    aliases,
-    keyProvider: issued.provider,
-    defaultProvider,
-    providers: map,
-    blocked,
-  });
-
-  if (payload && typeof payload === "object" && picked.model) {
-    (payload as { model: string }).model = picked.model;
+  const conversational =
+    rest === "chat/completions" || rest === "completions" || rest === "responses" || rest === "messages";
+  let sessionId: string | undefined;
+  let sessionStub: DurableObjectStub<ChatSession> | undefined;
+  let forwardedMessages: ChatMessage[] | undefined;
+  if (conversational) {
+    sessionId = resolveSessionId({
+      header: (name) => request.headers.get(name),
+      payload: payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : null,
+      keyId: issued.id,
+    });
   }
-  if (picked.model && !modelAllowed(picked.provider, picked.model)) {
-    throw new GatewayError(400, "model_not_allowed", `Model '${picked.model}' is not enabled on this upstream`);
+  if (
+    sessionId &&
+    rest === "chat/completions" &&
+    payload &&
+    typeof payload === "object" &&
+    Array.isArray((payload as { messages?: unknown }).messages)
+  ) {
+    const incoming = (payload as { messages: ChatMessage[] }).messages;
+    sessionStub = env.SESSIONS.get(env.SESSIONS.idFromName(`${issued.id}:${sessionId}`));
+    const merged = looksLikeFullHistory(incoming)
+      ? incoming
+      : mergeSessionMessages(await sessionStub.load(), incoming);
+    (payload as { messages: ChatMessage[] }).messages = merged;
+    forwardedMessages = merged;
   }
 
   const fallbackQuota = defaultQuotaTokens(env.DEFAULT_QUOTA_TOKENS);
@@ -513,6 +602,29 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
     }
   }
 
+  let autoTierName: "easy" | "hard" | undefined;
+  let autoVia: "pin" | "hint" | "model" | "fallback" | undefined;
+  let modelChain: string[] | undefined;
+  let pinnedHard: string | null = null;
+  if (isAutoModel(model)) {
+    const plan = await planAuto({
+      rest,
+      route: autoRoute,
+      messages: forwardedMessages ?? [],
+      session: sessionStub,
+      providers: map,
+      blocked,
+      aliases,
+      keyProvider: issued.provider,
+      defaultProvider,
+      charge: (providerId, tokens) => board.add(issued.id, providerId, tokens),
+    });
+    autoTierName = plan.tier;
+    autoVia = plan.via;
+    modelChain = plan.chain;
+    if (plan.tier === "hard" && sessionStub) pinnedHard = await sessionStub.loadAutoModel();
+  }
+
   if (rest === "chat/completions" && payload && typeof payload === "object") {
     const p = payload as { stream?: unknown; stream_options?: Record<string, unknown> };
     if (p.stream === true) {
@@ -520,113 +632,161 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
     }
   }
 
-  let sessionId: string | undefined;
-  let sessionStub: DurableObjectStub<ChatSession> | undefined;
-  let forwardedMessages: ChatMessage[] | undefined;
-  if (rest === "chat/completions" && payload && typeof payload === "object" && Array.isArray((payload as { messages?: unknown }).messages)) {
-    const incoming = (payload as { messages: ChatMessage[] }).messages;
-    sessionId = resolveSessionId({
-      header: (name) => request.headers.get(name),
-      payload: payload as Record<string, unknown>,
-      keyId: issued.id,
-    });
-    sessionStub = env.SESSIONS.get(env.SESSIONS.idFromName(`${issued.id}:${sessionId}`));
-    const merged = looksLikeFullHistory(incoming)
-      ? incoming
-      : mergeSessionMessages(await sessionStub.load(), incoming);
-    (payload as { messages: ChatMessage[] }).messages = merged;
-    forwardedMessages = merged;
-  }
-
-  let peers = vendorPeers(map, picked.provider.id, blocked);
-  if (issued.provider) peers = peers.filter((p) => p.id === issued.provider);
-  if (!peers.length) {
-    throw new GatewayError(503, "provider_blacklisted", `Upstream '${picked.provider.id}' is blacklisted`);
-  }
-  const startId = await board.takeRoundRobin(picked.provider.baseUrl, peers.map((p) => p.id));
-  const ordered = rotateFrom(peers, startId);
-  const body = request.method === "GET" ? undefined : JSON.stringify(payload);
-
-  for (let i = 0; i < ordered.length; i++) {
-    const account = ordered[i];
-    const headers = new Headers();
-    request.headers.forEach((value, key) => {
-      if (!HOP.has(key.toLowerCase())) headers.set(key, value);
-    });
-    headers.set("authorization", `Bearer ${account.apiKey}`);
-    if (rest === "messages") headers.set("x-api-key", account.apiKey);
-    if (sessionId) {
-      headers.set("x-session-id", sessionId);
-      headers.set("x-opencode-session", sessionId);
-    }
-    const more = i < ordered.length - 1;
-    if (isGoSubscription(account.baseUrl)) {
-      const usage = await fetchJsonSilent(joinUrl(account.baseUrl, "usage"), account.apiKey);
-      if (goAllowanceBlocks(usage, picked.model)) {
-        if (more) continue;
-        throw new GatewayError(
-          429,
-          "allowance_exhausted",
-          "OpenCode Go allowance is exhausted; refused so this request is not billed as extra usage",
-        );
-      }
-    }
-    console.log(
-      JSON.stringify({
-        message: "proxy",
-        keyId: issued.id,
-        provider: account.id,
-        model: picked.model || null,
-        path: rest,
-        sessionId: sessionId || null,
-        messages: forwardedMessages?.length ?? null,
-        attempt: i + 1,
-        pool: ordered.length,
-      }),
-    );
-    let upstream: Response;
+  const specs = modelChain ?? [model];
+  let lastFailure: GatewayError | null = null;
+  targets: for (let s = 0; s < specs.length; s++) {
+    const spec = specs[s];
+    const moreModels = modelChain != null && s < specs.length - 1;
+    let picked;
     try {
-      upstream = await fetch(joinUrl(account.baseUrl, rest), {
-        method: request.method,
-        headers,
-        body,
+      picked = pickUpstream({
+        requestedModel: spec,
+        aliases,
+        keyProvider: issued.provider,
+        defaultProvider,
+        providers: map,
+        blocked,
       });
     } catch (err) {
-      console.error(JSON.stringify({
-        message: "upstream_fetch",
-        provider: account.id,
-        error: err instanceof Error ? err.message : String(err),
-      }));
-      if (more) continue;
-      throw new GatewayError(502, "upstream_error", "Failed to reach upstream provider");
+      if (moreModels && err instanceof GatewayError) {
+        lastFailure = err;
+        continue;
+      }
+      throw err;
     }
-    const action = failoverAction(upstream.status);
-    if (action !== "stop" && more) {
+    if (payload && typeof payload === "object" && picked.model) {
+      (payload as { model: string }).model = picked.model;
+    }
+    // 下游直连仍走 modelAllowed。auto 档位是管理员选的，可以用上游有、但没开放给下游的模型。
+    if (modelChain == null && picked.model && !modelAllowed(picked.provider, picked.model)) {
+      if (moreModels) {
+        lastFailure = new GatewayError(400, "model_not_allowed", `Model '${picked.model}' is not enabled on this upstream`);
+        continue;
+      }
+      throw new GatewayError(400, "model_not_allowed", `Model '${picked.model}' is not enabled on this upstream`);
+    }
+
+    let peers = vendorPeers(map, picked.provider.id, blocked);
+    if (issued.provider) peers = peers.filter((p) => p.id === issued.provider);
+    if (!peers.length) {
+      if (moreModels) {
+        lastFailure = new GatewayError(503, "provider_blacklisted", `Upstream '${picked.provider.id}' is blacklisted`);
+        continue;
+      }
+      throw new GatewayError(503, "provider_blacklisted", `Upstream '${picked.provider.id}' is blacklisted`);
+    }
+    const peerIds = peers.map((p) => p.id);
+    const startId = sessionId
+      ? stickyAccountId(peerIds, sessionId)
+      : await board.takeRoundRobin(picked.provider.baseUrl, peerIds);
+    const ordered = rotateFrom(peers, startId);
+
+    for (let i = 0; i < ordered.length; i++) {
+      const account = ordered[i];
+      const headers = new Headers();
+      request.headers.forEach((value, key) => {
+        if (!HOP.has(key.toLowerCase())) headers.set(key, value);
+      });
+      headers.set("authorization", `Bearer ${account.apiKey}`);
+      if (rest === "messages") headers.set("x-api-key", account.apiKey);
+      applyUpstreamSticky(headers, payload, account.baseUrl, sessionId, rest);
+      const body = request.method === "GET" ? undefined : JSON.stringify(payload);
+      const more = i < ordered.length - 1;
+      if (isGoSubscription(account.baseUrl)) {
+        const usage = await fetchJsonSilent(joinUrl(account.baseUrl, "usage"), account.apiKey);
+        if (goAllowanceBlocks(usage, picked.model)) {
+          if (more) continue;
+          const exhausted = new GatewayError(
+            429,
+            "allowance_exhausted",
+            "OpenCode Go allowance is exhausted; refused so this request is not billed as extra usage",
+          );
+          if (moreModels) {
+            lastFailure = exhausted;
+            continue targets;
+          }
+          throw exhausted;
+        }
+      }
+      console.log(
+        JSON.stringify({
+          message: "proxy",
+          keyId: issued.id,
+          provider: account.id,
+          model: picked.model || null,
+          auto: autoTierName || null,
+          autoVia: autoVia || null,
+          path: rest,
+          sessionId: sessionId || null,
+          messages: forwardedMessages?.length ?? null,
+          attempt: i + 1,
+          pool: ordered.length,
+          modelTry: s + 1,
+        }),
+      );
+      let upstream: Response;
+      try {
+        upstream = await fetch(joinUrl(account.baseUrl, rest), {
+          method: request.method,
+          headers,
+          body,
+        });
+      } catch (err) {
+        console.error(JSON.stringify({
+          message: "upstream_fetch",
+          provider: account.id,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        if (more) continue;
+        const failed = new GatewayError(502, "upstream_error", "Failed to reach upstream provider");
+        if (moreModels) {
+          lastFailure = failed;
+          continue targets;
+        }
+        throw failed;
+      }
+      const action = failoverAction(upstream.status);
+      if (action !== "stop" && more) {
+        if (action === "ban-next") {
+          console.error(JSON.stringify({ message: "upstream_auth", provider: account.id, status: upstream.status }));
+          ctx.waitUntil(banUpstream(env.KEYS, account.id, `upstream HTTP ${upstream.status}`, true));
+        }
+        try { await upstream.body?.cancel(); } catch { /* ignore */ }
+        continue;
+      }
       if (action === "ban-next") {
         console.error(JSON.stringify({ message: "upstream_auth", provider: account.id, status: upstream.status }));
         ctx.waitUntil(banUpstream(env.KEYS, account.id, `upstream HTTP ${upstream.status}`, true));
+        try { await upstream.body?.cancel(); } catch { /* ignore */ }
+        if (moreModels) {
+          lastFailure = new GatewayError(502, "upstream_error", "Upstream provider authentication failed");
+          continue targets;
+        }
+        throw new GatewayError(502, "upstream_error", "Upstream provider authentication failed");
       }
-      try { await upstream.body?.cancel(); } catch { /* ignore */ }
-      continue;
+      if (moreModels && modelFallback(upstream.status)) {
+        try { await upstream.body?.cancel(); } catch { /* ignore */ }
+        lastFailure = new GatewayError(upstream.status, "upstream_error", `Upstream '${picked.provider.id}' rejected model '${picked.model}'`);
+        continue targets;
+      }
+      if (autoTierName === "hard" && sessionStub && spec && upstream.status < 400 && spec !== pinnedHard) {
+        await sessionStub.saveAutoModel(spec);
+      }
+      return passthrough(upstream, ctx, {
+        sessionId,
+        sessionStub,
+        autoTier: autoTierName,
+        prior: forwardedMessages,
+        meter: {
+          board,
+          keyId: issued.id,
+          providerId: account.id,
+          estimate: estimateTokens(payload ?? rest),
+        },
+      });
     }
-    if (action === "ban-next") {
-      console.error(JSON.stringify({ message: "upstream_auth", provider: account.id, status: upstream.status }));
-      ctx.waitUntil(banUpstream(env.KEYS, account.id, `upstream HTTP ${upstream.status}`, true));
-      throw new GatewayError(502, "upstream_error", "Upstream provider authentication failed");
-    }
-    return passthrough(upstream, ctx, {
-      sessionId,
-      sessionStub,
-      prior: forwardedMessages,
-      meter: {
-        board,
-        keyId: issued.id,
-        providerId: account.id,
-        estimate: estimateTokens(payload ?? rest),
-      },
-    });
   }
-  throw new GatewayError(502, "upstream_error", "Failed to reach upstream provider");
+  throw lastFailure ?? new GatewayError(502, "upstream_error", "Failed to reach upstream provider");
 }
 
 async function fetchUpstreamModels(provider: Provider): Promise<string[]> {
@@ -636,7 +796,7 @@ async function fetchUpstreamModels(provider: Provider): Promise<string[]> {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return [];
-    return parseModelsResponse(await res.json()).filter((id) => modelAllowed(provider, id));
+    return parseModelsResponse(await res.json());
   } catch {
     return [];
   }
@@ -644,17 +804,21 @@ async function fetchUpstreamModels(provider: Provider): Promise<string[]> {
 
 async function fetchGroupModels(members: Provider[]): Promise<string[]> {
   for (const p of members) {
-    const ids = await fetchUpstreamModels(p);
+    const ids = (await fetchUpstreamModels(p)).filter((id) => modelAllowed(p, id));
     if (ids.length) return ids;
   }
   return [];
 }
 
-async function listModels(providers: Provider[]): Promise<Response> {
+async function listModels(providers: Provider[], includeAuto: boolean): Promise<Response> {
   const groups = await Promise.all(
     vendorGroups(providers).map(async (g) => ({ providerId: g.id, models: await fetchGroupModels(g.members) })),
   );
-  return Response.json({ object: "list", data: exposeModels(groups) }, { headers: corsHeaders() });
+  const data = exposeModels(groups);
+  return Response.json(
+    { object: "list", data: includeAuto ? exposeAutoModel(data) : data },
+    { headers: corsHeaders() },
+  );
 }
 
 async function passthrough(
@@ -663,6 +827,7 @@ async function passthrough(
   session: {
     sessionId?: string;
     sessionStub?: DurableObjectStub<ChatSession>;
+    autoTier?: "easy" | "hard";
     prior?: ChatMessage[];
     meter: {
       board: DurableObjectStub<QuotaBoard>;
@@ -681,6 +846,7 @@ async function passthrough(
     headers.set("x-session-id", session.sessionId);
     headers.set("x-opencode-session", session.sessionId);
   }
+  if (session.autoTier) headers.set("x-auto-tier", session.autoTier);
 
   if (!upstream.body || upstream.status >= 400) {
     return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });

@@ -68,6 +68,7 @@ npx wrangler secret put OPENCODE_API_KEY
 | Secret | `{ID}_API_KEY` | `PROVIDERS` 里每个 `id` 对应一把 Key |
 | var | `PROVIDERS` | JSON 数组，上游账号列表。没写模型前缀时走第一个配了密钥的。每项可加 `quota` 声明余额查询 |
 | var | `MODEL_ALIASES` | JSON 对象，例如 `{"gpt-4":"opencode/gpt-5.4"}` |
+| 管理后台 | auto 简单档 / 复杂档 | 简单档一个模型，复杂档按顺序回退。没配则用内置档：简单档 `opencode/qwen3.8-flash`，复杂档 `grok/grok-4.7` → `opencode/grok-4.7` → `opencode/kimi-k3` → `opencode/qwen4-max` |
 | var | `DEFAULT_QUOTA_TOKENS` | 签发 Key 的默认 token 额度，默认 `1000000`；`0` 表示不限额 |
 
 加一个 OpenAI 官方上游示例：
@@ -90,7 +91,9 @@ npx wrangler secret put OPENCODE_API_KEY
 | --- | --- |
 | Base URL | `https://<你的 worker>/v1` |
 | API Key | `sk-...` |
-| 模型 | 上游真实 ID，或 `opencode/<模型>` |
+| 模型 | `auto`，或上游真实 ID，或 `opencode/<模型>` |
+
+`auto` 只用于 `POST /v1/chat/completions`，按日常使用来分。寒暄、翻译、润色、摘要、解释，以及一眼能定的简单请求，直接走便宜模型。排错、证明、用户在纠正上一轮，直接走难档。其余把最近几轮原文（不含客户端塞来的 system 人设）交给分档模型，只让它回答 `easy` 或 `hard`，拿不准算 easy。分档不使用对外的 easy 名字，按 `qwen3.8-flash`、同套餐的 `qwen3.7-plus`、再 `deepseek-chat` 的顺序，跳过套餐用满或余额为 0 的账号；都问失败才看本地规则，默认 easy，只有对话里已经是堆栈才算 hard。短跟进（继续、改一下、为什么）沿用上一档；换了一件明确的易事可以降回来。日常回答先用后台配的简单档，没配就用内置的 `opencode/qwen3.8-flash`；它没钱或没有这个模型时按同一条便宜链换。复杂档按后台配的顺序从前往后试，没配就用内置顺序，前面的限流、鉴权失败、没有这个模型、套餐用满或 5xx 才换下一个，并钉住这次成功的那个难模型。分档花掉的 token 记在这把 Key 上。响应头 `x-auto-tier` 是这次的档。锁死到某一个上游的 Key，链上不属于它的模型会被跳过。
 
 ### WorkBuddy
 
@@ -136,7 +139,12 @@ Settings → Models → 打开 Override OpenAI Base URL → 填 `https://<worker
    - JSON 里的 `session_id` / `conversation_id`
    - 都没有则用这把签发 Key 自己的默认会话（`key:<id>`）
 3. 响应会带回 `x-session-id`。同一窗口下次带上这个头，就不会和别的窗口串台。
-4. 同时会把 `x-opencode-session` 传给上游，方便 OpenCode 做前缀缓存。
+4. 同一会话钉在同厂商的同一把上游账号上。429 仍会临时换号，下一跳还是先打原来那把。出站标记按厂商写，客户端已经带的不覆盖：
+   - OpenCode：`x-opencode-session`
+   - xAI：Chat Completions 用 `x-grok-conv-id`，Responses 用 `prompt_cache_key`
+   - DeepSeek：`user_id`（他们用这个隔离 KV 缓存）
+   - OpenAI：`prompt_cache_key`
+   - Anthropic `/v1/messages`：顶层 `cache_control: { type: "ephemeral" }`
 
 同一把 Key 开两个窗口且都不带头时，会共用默认会话。要隔离就让客户端加 `x-session-id`。
 

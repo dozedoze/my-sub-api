@@ -3,6 +3,10 @@
   "name": "my-sub-api",
   "account_id": "faa48c4594352d235803143377d82d1f",
   "main": "src/index.ts",
+  // admin 页的 css / 浏览器脚本按文本打进 Worker，不参与打包。
+  "rules": [
+    { "type": "Text", "globs": ["**/*.css", "**/*.svg", "./admin/*.js"], "fallthrough": true }
+  ],
   "compatibility_date": "2026-11-19",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
@@ -18,7 +22,7 @@
   // 上游 API Key / ADMIN_TOKEN 不要写在这里。用 wrangler secret put，本地用 .dev.vars。
   "vars": {
     // 上游列表。对应 secret 为 {ID}_API_KEY
-    // 同一 baseUrl 的多个 id 视为同厂商账号池，会轮询；429 换号，401/403 拉黑后换号
+    // 同一 baseUrl 的多个 id 视为同厂商账号池。对话按会话钉账号，其它请求轮询。429 换号，401/403 拉黑后换号
     "PROVIDERS": [
       {
         "id": "grok",

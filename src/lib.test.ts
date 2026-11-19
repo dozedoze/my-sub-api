@@ -16,7 +16,9 @@ import {
   looksLikeFullHistory,
   mergeSessionMessages,
   exposeModels,
+  exposeAutoModel,
   failoverAction,
+  modelFallback,
   parseProviders,
   parseJsonObject,
   parseModelsResponse,
@@ -31,14 +33,18 @@ import {
   pickUpstream,
   extraPaidChannel,
   goAllowanceBlocks,
+  quotaBlocks,
   modelAllowed,
   isGoSubscription,
   loadProviders,
   mintAdminSession,
+  isAdminShellPath,
   readCookie,
   resolveSessionId,
   verifyAdminSession,
   rotateFrom,
+  stickyAccountId,
+  applyUpstreamSticky,
   secretName,
   stripV1,
   tokensFromUsage,
@@ -48,6 +54,20 @@ import {
   vendorPeers,
   type Provider,
 } from "./lib.ts";
+import {
+  autoRouteFollowUp,
+  autoRouteHint,
+  autoRouterFallback,
+  autoRouterTranscript,
+  cheapRouterChain,
+  easyServeChain,
+  orderAutoTargets,
+  parseAutoRoute,
+  resolveAutoRoute,
+  DEFAULT_AUTO_ROUTE,
+  parseAutoRouterReply,
+  stickAutoTier,
+} from "./auto.ts";
 
 function providers(...ids: string[]): Map<string, Provider> {
   return new Map(
@@ -280,6 +300,117 @@ test("exposeModels prefixes only when multiple upstreams", () => {
   );
   assert.deepEqual(parseModelsResponse({ data: [{ id: " a " }, { id: "" }, {}] }), ["a"]);
   assert.deepEqual(parseModelsResponse({ models: ["gpt-4o", { id: "o3" }] }), ["gpt-4o", "o3"]);
+  assert.equal(exposeAutoModel([{ id: "gpt-4o", object: "model", created: 0, owned_by: "openai" }])[0].id, "auto");
+  assert.equal(parseAutoRoute(undefined), null);
+  assert.equal(parseAutoRoute({}), null);
+  assert.deepEqual(resolveAutoRoute(null), { route: DEFAULT_AUTO_ROUTE, saved: false });
+  assert.deepEqual(resolveAutoRoute({}), { route: DEFAULT_AUTO_ROUTE, saved: false });
+  assert.equal(resolveAutoRoute({ easy: "a", hard: ["b"] }).saved, true);
+  assert.deepEqual(parseAutoRoute({ easy: " opencode/qwen3.8-flash ", hard: "opencode/grok-4.7" }), {
+    easy: "opencode/qwen3.8-flash",
+    hard: ["opencode/grok-4.7"],
+  });
+  assert.deepEqual(
+    parseAutoRoute({ easy: "opencode/qwen3.8-flash", hard: [" grok/grok-4.7 ", "opencode/grok-4.7"] }).hard,
+    ["grok/grok-4.7", "opencode/grok-4.7"],
+  );
+  assert.throws(
+    () => parseAutoRoute({ easy: "only-one" }),
+    (err: unknown) => err instanceof GatewayError && err.code === "config_error",
+  );
+});
+
+test("auto route asks the cheap model except for a bare greeting", () => {
+  assert.equal(autoRouteHint([{ role: "user", content: "你好" }]), "easy");
+  assert.equal(
+    autoRouteHint([
+      { role: "system", content: "你是编程助手".repeat(40) },
+      { role: "user", content: "hi" },
+    ]),
+    "easy",
+  );
+  assert.equal(autoRouteHint([{ role: "user", content: "帮我看看这个接口为什么 500" }]), "ask");
+  assert.equal(autoRouteHint([{ role: "user", content: "把这段话润色得礼貌一点" }]), "easy");
+  assert.equal(autoRouteHint([{ role: "user", content: "翻译这段报错：connection reset" }]), "easy");
+  assert.equal(autoRouteHint([{ role: "user", content: "证明一下勾股定理" }]), "hard");
+  assert.equal(
+    autoRouteHint([{ role: "user", content: "这段报错怎么改\n```\nError: boom\n```" }]),
+    "hard",
+  );
+  assert.equal(
+    autoRouteHint([
+      { role: "user", content: "上一问" },
+      { role: "assistant", content: "答错了" },
+      { role: "user", content: "不对" },
+    ]),
+    "hard",
+  );
+  assert.equal(
+    autoRouteHint([
+      { role: "user", content: "查一下" },
+      { role: "assistant", content: "", tool_calls: [{ function: { name: "search" } }] },
+      { role: "tool", content: "Error: timeout" },
+      { role: "assistant", content: "", tool_calls: [{ function: { name: "search" } }] },
+      { role: "tool", content: "又失败了" },
+    ]),
+    "hard",
+  );
+  const follow = [
+    { role: "user", content: "帮我把这个状态机改成可恢复的" },
+    { role: "assistant", content: "好" },
+    { role: "user", content: "继续" },
+  ];
+  assert.equal(autoRouteHint(follow), "ask");
+  assert.equal(autoRouteFollowUp(follow), true);
+  assert.equal(autoRouteFollowUp([{ role: "user", content: "翻译一下" }]), false);
+
+  const transcript = autoRouterTranscript([
+    { role: "system", content: "巨大的人设不要带进去" },
+    { role: "user", content: "看下这段" },
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "read_file" } }] },
+    { role: "tool", content: "Error: boom" },
+  ]);
+  assert.equal(transcript.includes("巨大的人设"), false);
+  assert.match(transcript, /调用 read_file/);
+  assert.match(transcript, /工具：Error: boom/);
+  assert.equal(parseAutoRouterReply("Hard"), "hard");
+  assert.equal(parseAutoRouterReply("easy."), "easy");
+  assert.equal(parseAutoRouterReply("简单，这是寒暄"), "easy");
+  assert.equal(parseAutoRouterReply("难"), "hard");
+  assert.equal(parseAutoRouterReply("maybe"), null);
+  assert.equal(autoRouterFallback("x".repeat(500)), "easy");
+  assert.equal(autoRouterFallback("Traceback (most recent call last):"), "hard");
+  assert.equal(autoRouterFallback("今天星期几"), "easy");
+  assert.equal(stickAutoTier("easy", "hard", true), "hard");
+  assert.equal(stickAutoTier("hard", "easy", true), "hard");
+  assert.equal(stickAutoTier("hard", "easy", false), "easy");
+  assert.deepEqual(cheapRouterChain(["opencode", "deepseek"]), [
+    "opencode/qwen3.8-flash",
+    "opencode/qwen3.7-plus",
+    "deepseek/deepseek-chat",
+  ]);
+  assert.deepEqual(cheapRouterChain(["grok"]), []);
+  assert.deepEqual(easyServeChain("opencode/qwen3.8-flash", ["opencode", "deepseek"]), [
+    "opencode/qwen3.8-flash",
+    "opencode/qwen3.7-plus",
+    "deepseek/deepseek-chat",
+  ]);
+  assert.equal(quotaBlocks({ is_available: false, balance_infos: [{ total_balance: "3" }] }), true);
+  assert.equal(quotaBlocks({ balance_infos: [{ currency: "CNY", total_balance: "0" }] }), true);
+  assert.equal(quotaBlocks({ balance_infos: [{ total_balance: "12.5" }] }), false);
+  assert.equal(quotaBlocks({ total: { val: "0" } }), true);
+  assert.equal(quotaBlocks({ total: { val: "250" } }), false);
+  assert.equal(quotaBlocks({ usage: { monthly: { percent: 100 } } }), false);
+  const chain = ["grok/grok-4.7", "opencode/grok-4.7", "opencode/kimi-k3"];
+  assert.deepEqual(orderAutoTargets(chain, null), chain);
+  assert.deepEqual(orderAutoTargets(chain, "opencode/grok-4.7"), [
+    "opencode/grok-4.7",
+    "opencode/kimi-k3",
+    "grok/grok-4.7",
+  ]);
+  assert.equal(modelFallback(429), true);
+  assert.equal(modelFallback(404), true);
+  assert.equal(modelFallback(400), false);
 });
 
 test("pickUpstream skips blacklisted upstreams", () => {
@@ -387,6 +518,54 @@ test("session merge keeps client history and fills in single-turn", () => {
   const onlyNew = [{ role: "user", content: "再问一句" }];
   assert.equal(looksLikeFullHistory(onlyNew), false);
   assert.deepEqual(mergeSessionMessages(stored, onlyNew), [...stored, ...onlyNew]);
+});
+
+test("upstream sticky follows the vendor and pins the account", () => {
+  const ids = ["a", "b", "c"];
+  assert.equal(stickyAccountId(ids, "win-A"), stickyAccountId(ids, "win-A"));
+  assert.equal(stickyAccountId(["only"], "win-A"), "only");
+  assert.ok(ids.includes(stickyAccountId(ids, "win-A")));
+
+  const leaked = new Headers({ "x-opencode-session": "leak", "x-session-id": "leak", "x-grok-conv-id": "leak" });
+  const xai: Record<string, unknown> = { model: "grok-4.7" };
+  applyUpstreamSticky(leaked, xai, "https://api.x.ai/v1", "conv-1", "chat/completions");
+  assert.equal(leaked.get("x-grok-conv-id"), "conv-1");
+  assert.equal(leaked.get("x-opencode-session"), null);
+  assert.equal(leaked.get("x-session-id"), null);
+  assert.equal(xai.prompt_cache_key, undefined);
+
+  const xaiResponses: Record<string, unknown> = {};
+  const xaiHeaders = new Headers();
+  applyUpstreamSticky(xaiHeaders, xaiResponses, "https://api.x.ai/v1", "conv-1", "responses");
+  assert.equal(xaiResponses.prompt_cache_key, "conv-1");
+  assert.equal(xaiHeaders.get("x-grok-conv-id"), null);
+
+  const oc = new Headers({ "x-grok-conv-id": "nope" });
+  const ocBody: Record<string, unknown> = {};
+  applyUpstreamSticky(oc, ocBody, "https://opencode.ai/zen/go/v1", "key:abc", "chat/completions");
+  assert.equal(oc.get("x-opencode-session"), "key:abc");
+  assert.equal(oc.get("x-grok-conv-id"), null);
+  assert.equal(ocBody.user_id, undefined);
+
+  const ds: Record<string, unknown> = {};
+  applyUpstreamSticky(new Headers(), ds, "https://api.deepseek.com/v1", "key:abc", "chat/completions");
+  assert.equal(ds.user_id, "key_abc");
+  const dsKept: Record<string, unknown> = { user_id: "mine" };
+  applyUpstreamSticky(new Headers(), dsKept, "https://api.deepseek.com/v1", "key:abc", "chat/completions");
+  assert.equal(dsKept.user_id, "mine");
+
+  const oai: Record<string, unknown> = { prompt_cache_key: "keep" };
+  applyUpstreamSticky(new Headers(), oai, "https://api.openai.com/v1", "s", "chat/completions");
+  assert.equal(oai.prompt_cache_key, "keep");
+
+  const ant: Record<string, unknown> = { messages: [{ role: "user", content: "hi" }] };
+  applyUpstreamSticky(new Headers(), ant, "https://api.anthropic.com/v1", "s", "messages");
+  assert.deepEqual(ant.cache_control, { type: "ephemeral" });
+  const antKept: Record<string, unknown> = {
+    messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral", ttl: "1h" } }] }],
+  };
+  applyUpstreamSticky(new Headers(), antKept, "https://api.anthropic.com/v1", "s", "messages");
+  assert.equal(antKept.cache_control, undefined);
 });
 
 test("session id prefers header then falls back to key", () => {
@@ -513,4 +692,15 @@ test("admin session cookie is signed, expiring, not the raw token", async () => 
   assert.equal(adminSessionSetCookie(value, "http://127.0.0.1:8787/admin").includes("Secure"), false);
   assert.match(adminSessionClearCookie("https://aofahub.dev/admin"), /Max-Age=0/);
   assert.equal(readCookie(`a=1; ${ADMIN_SESSION_COOKIE}=${value}; b=2`, ADMIN_SESSION_COOKIE), value);
+});
+
+test("admin shell paths are not API", () => {
+  assert.equal(isAdminShellPath("/admin"), true);
+  assert.equal(isAdminShellPath("/admin/keys"), true);
+  assert.equal(isAdminShellPath("/admin/upstream"), true);
+  assert.equal(isAdminShellPath("/admin/guide"), true);
+  assert.equal(isAdminShellPath("/admin/api"), false);
+  assert.equal(isAdminShellPath("/admin/api/status"), false);
+  assert.equal(isAdminShellPath("/administration"), false);
+  assert.equal(isAdminShellPath("/"), false);
 });

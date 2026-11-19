@@ -89,6 +89,22 @@ export async function deleteIssuedKey(kv: KVNamespace, id: string): Promise<bool
 }
 
 const BL_KEY = "upstream_blacklist";
+const AUTO_KEY = "auto_models";
+
+export async function loadAutoModels(kv: KVNamespace): Promise<unknown | null> {
+  return (await kv.get(AUTO_KEY, "json")) ?? null;
+}
+
+export async function saveAutoModels(
+  kv: KVNamespace,
+  route: { easy: string; hard: string[] },
+): Promise<void> {
+  await kv.put(AUTO_KEY, JSON.stringify({ easy: route.easy, hard: route.hard }));
+}
+
+export async function clearAutoModels(kv: KVNamespace): Promise<void> {
+  await kv.delete(AUTO_KEY);
+}
 
 export type UpstreamBan = {
   providerId: string;

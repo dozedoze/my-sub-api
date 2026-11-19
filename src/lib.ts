@@ -129,6 +129,11 @@ export function parseJsonObject(raw: unknown): Record<string, string> {
   return out;
 }
 
+/** 限流、鉴权、没有这个模型、5xx 可以换下一个模型。400 是请求本身的问题。 */
+export function modelFallback(status: number): boolean {
+  return status === 401 || status === 402 || status === 403 || status === 404 || status === 408 || status === 429 || status >= 500;
+}
+
 export function parseProviders(raw: unknown): ProviderConfig[] {
   const value = decodeJsonVar(raw);
   if (value == null) return [];
@@ -253,6 +258,28 @@ export function goAllowanceBlocks(json: unknown, model: string): boolean {
   if (/(^|[-_/])free($|[-_/])/i.test(model)) return false;
   const parsed = parseOpencodeGoUsage(json);
   return Boolean(parsed?.windows?.some((w) => w.percent >= 100 || w.status === "rate-limited"));
+}
+
+/** 预付余额用尽。认不出的响应不当成没钱，交给真正的请求去试。 */
+export function quotaBlocks(json: unknown): boolean {
+  if (!json || typeof json !== "object") return false;
+  const rec = json as Record<string, unknown>;
+  if (rec.is_available === false) return true;
+  if (Array.isArray(rec.balance_infos)) {
+    const totals: number[] = [];
+    for (const item of rec.balance_infos) {
+      if (!item || typeof item !== "object") continue;
+      const n = asNumberish((item as Record<string, unknown>).total_balance);
+      if (n != null) totals.push(n);
+    }
+    if (totals.length > 0 && totals.every((n) => n <= 0)) return true;
+  }
+  const total = rec.total;
+  if (total && typeof total === "object" && !Array.isArray(total)) {
+    const n = asNumberish((total as Record<string, unknown>).val);
+    if (n != null && n <= 0) return true;
+  }
+  return false;
 }
 
 export function loadProviders(env: object & { PROVIDERS?: unknown }): {
@@ -393,6 +420,11 @@ export function adminSessionSetCookie(value: string, requestUrl: string, maxAgeS
 
 export function adminSessionClearCookie(requestUrl: string): string {
   return adminSessionSetCookie("deleted", requestUrl, 0);
+}
+
+/** GET 后台页。`/admin/api` 是接口，不走这里。 */
+export function isAdminShellPath(path: string): boolean {
+  return path === "/admin" || (path.startsWith("/admin/") && !path.startsWith("/admin/api"));
 }
 
 export async function sha256hex(text: string): Promise<string> {
@@ -834,8 +866,8 @@ export function corsHeaders(): HeadersInit {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
     "access-control-allow-headers":
-      "Authorization, Content-Type, x-api-key, api-key, anthropic-version, openai-beta, x-stainless-timeout, x-session-id, x-conversation-id, x-opencode-session",
-    "access-control-expose-headers": "x-session-id, x-opencode-session",
+      "Authorization, Content-Type, x-api-key, api-key, anthropic-version, openai-beta, x-stainless-timeout, x-session-id, x-conversation-id, x-opencode-session, x-grok-conv-id",
+    "access-control-expose-headers": "x-session-id, x-opencode-session, x-auto-tier",
     "access-control-max-age": "86400",
   };
 }
@@ -859,7 +891,8 @@ export function resolveSessionId(opts: {
   const fromHeader =
     opts.header("x-session-id") ||
     opts.header("x-conversation-id") ||
-    opts.header("x-opencode-session");
+    opts.header("x-opencode-session") ||
+    opts.header("x-grok-conv-id");
   const body = opts.payload;
   const fromBody =
     (typeof body?.session_id === "string" && body.session_id) ||
@@ -966,6 +999,13 @@ export function exposeModels(groups: { providerId: string; models: string[] }[])
   return out;
 }
 
+export function exposeAutoModel(
+  models: { id: string; object: "model"; created: number; owned_by: string }[],
+): { id: string; object: "model"; created: number; owned_by: string }[] {
+  if (models.some((m) => m.id === "auto")) return models;
+  return [{ id: "auto", object: "model", created: 0, owned_by: "auto" }, ...models];
+}
+
 export function vendorPeers(
   providers: Map<string, Provider>,
   leadId: string,
@@ -991,6 +1031,74 @@ export function vendorGroups(providers: Provider[]): { id: string; members: Prov
     const members = byUrl.get(url)!;
     return { id: members[0].id, members };
   });
+}
+
+/** 同一会话钉在账号池的固定一把上。ponytail: 账号增删会让取模错位，这一会话的缓存冷一次。要稳就改成一致性哈希。 */
+export function stickyAccountId(ids: string[], sessionKey: string): string {
+  if (ids.length <= 1) return ids[0] ?? "";
+  let h = 2166136261;
+  for (let i = 0; i < sessionKey.length; i++) {
+    h ^= sessionKey.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ids[(h >>> 0) % ids.length];
+}
+
+const UPSTREAM_STICKY_HEADERS = ["x-opencode-session", "x-session-id", "x-conversation-id", "x-grok-conv-id"];
+
+function hasCacheControl(value: unknown, depth = 0): boolean {
+  if (!value || typeof value !== "object" || depth > 8) return false;
+  if (Array.isArray(value)) return value.some((item) => hasCacheControl(item, depth + 1));
+  const rec = value as Record<string, unknown>;
+  if (rec.cache_control) return true;
+  return Object.values(rec).some((item) => hasCacheControl(item, depth + 1));
+}
+
+function deepseekUserId(sessionId: string): string {
+  return sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 512);
+}
+
+/** 去掉别家的粘性头，再按这家上游的协议写。body 就地改，调用方再序列化。客户端已写的字段不覆盖。 */
+export function applyUpstreamSticky(
+  headers: Headers,
+  payload: unknown,
+  baseUrl: string,
+  sessionId: string | undefined,
+  rest: string,
+): void {
+  for (const name of UPSTREAM_STICKY_HEADERS) headers.delete(name);
+  if (!sessionId) return;
+  const host = providerHost(baseUrl);
+  const body =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  if (host === "opencode.ai" || host.endsWith(".opencode.ai")) {
+    headers.set("x-opencode-session", sessionId);
+    return;
+  }
+  if (host === "x.ai" || host.endsWith(".x.ai")) {
+    if (rest === "responses") {
+      if (body && typeof body.prompt_cache_key !== "string") body.prompt_cache_key = sessionId;
+    } else {
+      headers.set("x-grok-conv-id", sessionId);
+    }
+    return;
+  }
+  if ((host === "deepseek.com" || host.endsWith(".deepseek.com")) && rest === "chat/completions") {
+    if (body && typeof body.user_id !== "string") {
+      const id = deepseekUserId(sessionId);
+      if (id) body.user_id = id;
+    }
+    return;
+  }
+  if ((host === "api.openai.com" || host === "openai.com") && (rest === "chat/completions" || rest === "responses")) {
+    if (body && typeof body.prompt_cache_key !== "string") body.prompt_cache_key = sessionId;
+    return;
+  }
+  if ((host === "anthropic.com" || host.endsWith(".anthropic.com")) && rest === "messages") {
+    if (body && !hasCacheControl(body)) body.cache_control = { type: "ephemeral" };
+  }
 }
 
 export function rotateFrom<T extends { id: string }>(items: T[], startId: string): T[] {

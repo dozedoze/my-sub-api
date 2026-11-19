@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>API 分发</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <style>/*__CSS__*/</style>
+</head>
+<body>
+  <div id="login-wrap">
+    <div class="login-panel">
+      <div class="login-hero">
+        <img class="login-mark" src="/favicon.svg" width="56" height="56" alt="">
+        <h1>API 分发</h1>
+        <p class="sub">签发分发账号。上游 API Key 只留云端，不会下发给使用者。</p>
+      </div>
+      <form class="card" id="login-card">
+        <label for="token">管理员口令</label>
+        <input id="token" name="token" type="password" autocomplete="current-password" placeholder="输入管理员口令" autofocus />
+        <button type="submit" id="login">进入后台</button>
+        <p class="hint">口令不以明文存浏览器。登录后 Cookie 有效 7 天。</p>
+        <p class="err" id="login-err"></p>
+      </form>
+    </div>
+  </div>
+
+  <div id="shell" hidden>
+    <aside>
+      <div class="brand">
+        <strong>API 分发</strong>
+        <span>管理后台</span>
+      </div>
+      <nav aria-label="后台">
+        <a class="nav on" href="/admin/keys" data-nav="keys" aria-current="page">分发账号</a>
+        <a class="nav" href="/admin/upstream" data-nav="upstream">上游账号</a>
+        <a class="nav" href="/admin/guide" data-nav="guide">接入指南</a>
+      </nav>
+      <button class="ghost" type="button" id="logout">退出</button>
+    </aside>
+    <main>
+      <section data-page="keys">
+        <header class="page-head">
+          <h1>分发账号管理</h1>
+          <p class="sub">签发、调整额度、停用。明文只在创建时出现一次。</p>
+        </header>
+        <section class="card">
+          <div class="toolbar">
+            <strong>已签发</strong>
+            <button type="button" id="open-create">新建账号</button>
+            <button class="ghost refresh" type="button" id="refresh"><span class="ico" aria-hidden="true">↻</span>刷新</button>
+          </div>
+          <div class="keys-wrap">
+            <table class="keys">
+              <colgroup>
+                <col class="c-name" /><col class="c-prefix" /><col class="c-prov" /><col class="c-used" />
+                <col class="c-quota" /><col class="c-remain" /><col class="c-status" /><col class="c-actions" />
+              </colgroup>
+              <thead><tr><th>备注</th><th>前缀</th><th>上游</th><th>已用</th><th>额度</th><th>剩余</th><th>状态</th><th></th></tr></thead>
+              <tbody id="rows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section data-page="upstream" hidden>
+        <header class="page-head">
+          <h1>上游账号</h1>
+          <p class="sub">账号池、余额、拉黑，以及 auto 分档。点击模型名即可复制。</p>
+        </header>
+        <div class="page-body">
+        <section class="card">
+          <div class="toolbar">
+            <strong>账号池</strong>
+            <button class="ghost refresh" type="button" id="refresh-upstream"><span class="ico" aria-hidden="true">↻</span>刷新</button>
+          </div>
+          <p class="hint" id="providers"></p>
+          <p class="hint">同一 Base URL 的多个上游账号会轮询。上游返回 429 时切换账号；401 / 403 会拉黑该账号后再切换。签发时锁定上游的 Key 不参与轮询。</p>
+          <div id="provider-usage" style="margin-top:12px"></div>
+        </section>
+        </div>
+      </section>
+
+      <section data-page="guide" hidden>
+        <header class="page-head">
+          <h1>接入指南</h1>
+          <p class="sub">使用者只填两项：接口地址，以及签发的分发账号 Key。</p>
+        </header>
+        <div class="page-body">
+        <section class="card">
+          <strong>需要发给使用者的两项</strong>
+          <p class="hint">Key 在「分发账号」签发，明文只出现一次。关闭后无法再次查看。</p>
+          <div class="give-grid">
+            <div class="copy-field">
+              <div class="copy-field-label">接口地址</div>
+              <button type="button" class="copy-field-btn" id="copy-base">
+                <span class="mono" id="base-url"></span>
+                <span class="copy-field-tip">点击复制</span>
+              </button>
+            </div>
+            <div class="copy-field">
+              <div class="copy-field-label">分发账号 Key</div>
+              <div class="copy-field-static">在「分发账号」中签发，创建后请立即复制并发送给使用者</div>
+            </div>
+          </div>
+        </section>
+        <section class="card">
+          <strong>按客户端填写</strong>
+          <p class="hint">协议一律选 OpenAI Chat Completions。模型填 <code>auto</code> 会按对话难易自动选；也可以填「上游账号」页里的模型 id。多个上游时写成 <code>上游id/模型id</code>。</p>
+          <div class="tabs" id="guide-tabs">
+            <button type="button" class="tab on" data-tab="workbuddy">WorkBuddy</button>
+            <button type="button" class="tab" data-tab="opencode">OpenCode</button>
+            <button type="button" class="tab" data-tab="cursor">Cursor</button>
+            <button type="button" class="tab" data-tab="generic">Cherry Studio / 通用</button>
+          </div>
+          <div class="tab-panel" id="guide-panel"></div>
+        </section>
+        <section class="card">
+          <strong>列出可用模型</strong>
+          <p class="hint">用签发的 Key 调 <code>GET /v1/models</code>，返回的 id 才是客户端该填的模型名。</p>
+          <div class="copy-pre">
+            <button type="button" class="copy-pre-btn" id="copy-snippet"><span class="copy-field-tip">点击复制</span></button>
+            <pre id="snippet"></pre>
+          </div>
+        </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="create-dlg">
+    <h2>新建分发账号</h2>
+    <div class="field">
+      <label for="name">备注</label>
+      <input id="name" placeholder="例如 workbuddy-小王" />
+    </div>
+    <div class="field">
+      <label for="provider">上游账号</label>
+      <select id="provider"><option value="">全部上游（按模型前缀路由）</option></select>
+    </div>
+    <div class="field">
+      <label for="quota">额度（token）</label>
+      <input id="quota" type="number" min="0" step="1000" placeholder="空则用默认" />
+      <div class="quota-live" id="quota-live"></div>
+      <p class="hint" id="quota-hint" style="margin:8px 0 0">额度按上游返回的 token 计数。填 0 表示不限额。</p>
+    </div>
+    <p class="err" id="create-err"></p>
+    <div class="actions">
+      <button class="ghost" type="button" id="create-cancel">取消</button>
+      <button type="button" id="create">签发</button>
+    </div>
+  </dialog>
+  <dialog id="once-dlg">
+    <h2>分发账号已签发</h2>
+    <p class="hint">请将以下两项发送给使用者。关闭后无法再次查看。</p>
+    <div class="copy-field">
+      <div class="copy-field-label">API Key</div>
+      <button type="button" class="copy-field-btn copy-field-key" id="copy-once-key">
+        <span class="mono" id="once-key"></span>
+        <span class="copy-field-tip">点击复制</span>
+      </button>
+    </div>
+    <div class="copy-field">
+      <div class="copy-field-label">接口地址</div>
+      <button type="button" class="copy-field-btn" id="copy-once-url">
+        <span class="mono" id="once-base"></span>
+        <span class="copy-field-tip">点击复制</span>
+      </button>
+    </div>
+    <div class="how">
+      <p class="hint" style="margin:0 0 8px">客户端填写方式</p>
+      <div class="tabs" id="how-tabs">
+        <button type="button" class="tab on" data-tab="workbuddy">WorkBuddy</button>
+        <button type="button" class="tab" data-tab="opencode">OpenCode</button>
+        <button type="button" class="tab" data-tab="cursor">Cursor</button>
+        <button type="button" class="tab" data-tab="generic">Cherry Studio / 通用</button>
+      </div>
+      <div class="tab-panel" id="how-panel"></div>
+    </div>
+    <div class="actions">
+      <button class="ghost" type="button" id="once-close">关闭</button>
+    </div>
+  </dialog>
+  <dialog id="auto-dlg">
+    <h2 id="auto-title">选择模型</h2>
+    <p class="hint" id="auto-hint"></p>
+    <input id="auto-q" type="search" placeholder="搜索模型" aria-label="搜索模型" autocomplete="off" />
+    <div id="auto-list" class="auto-list"></div>
+    <p class="err" id="auto-err"></p>
+    <div class="actions">
+      <button class="ghost" type="button" id="auto-cancel">取消</button>
+    </div>
+  </dialog>
+  <script>/*__JS__*/</script>
+</body>
+</html>

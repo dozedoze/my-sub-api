@@ -1,9 +1,15 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "my-sub-api",
+  "account_id": "faa48c4594352d235803143377d82d1f",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-19",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "aofahub.dev", "custom_domain": true },
+    { "pattern": "www.aofahub.dev", "custom_domain": true }
+  ],
   "observability": {
     "enabled": true,
     "logs": { "enabled": true, "head_sampling_rate": 1 },

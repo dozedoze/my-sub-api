@@ -17,14 +17,9 @@
   },
   // 上游 API Key / ADMIN_TOKEN 不要写在这里。用 wrangler secret put，本地用 .dev.vars。
   "vars": {
-    "DEFAULT_PROVIDER": "opencode",
-    // OpenCode Zen / Console：官方 OpenAI 兼容入口
-    "OPENCODE_BASE_URL": "https://opencode.ai/zen/v1",
-    // Cursor 官方没有公开的 /v1/chat/completions。填你已有的 OpenAI 兼容地址，没有就留空。
-    "CURSOR_BASE_URL": "",
-    // 额外上游：直接写 JSON 数组即可（vars 支持 JSON 绑定）。对应 secret 为 {ID}_API_KEY
+    // 上游列表。对应 secret 为 {ID}_API_KEY
     // 同一 baseUrl 的多个 id 视为同厂商账号池，会轮询；429 换号，401/403 拉黑后换号
-    "EXTRA_PROVIDERS": [{"id":"grok","baseUrl":"https://api.x.ai/v1"}],
+    "PROVIDERS": [{"id":"grok","baseUrl":"https://api.x.ai/v1"}],
     // 模型别名，例如 {"gpt-4":"opencode/gpt-5.4","composer":"cursor/composer-2.5"}
     "MODEL_ALIASES": {},
     // 签发使用者 Key 时的默认 token 额度，0 表示不限额

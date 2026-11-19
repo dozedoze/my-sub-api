@@ -2,8 +2,6 @@
 declare namespace Cloudflare {
   interface Env {
     ADMIN_TOKEN: string;
-    OPENCODE_API_KEY: string;
-    CURSOR_API_KEY: string;
     DEFAULT_QUOTA_TOKENS: string;
   }
 }

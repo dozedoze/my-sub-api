@@ -23,18 +23,14 @@ WorkBuddy / OpenCode / Cursor
 
 ## 它不做什么
 
-Cursor **没有**公开的 Chat Completions 接口。官方 `crsr_` Key 走的是 Cloud Agents / 管理 API，不是 `POST /v1/chat/completions`。本项目**不会**去对接 Cursor 内部推理接口。
-
-`CURSOR_API_KEY` 只用于你已经有的、**OpenAI 兼容**的 Cursor 中转地址（填 `CURSOR_BASE_URL`）。没有就把这两项留空，只用 OpenCode。
-
-把 Cursor 当**客户端**连本站是可以的：覆盖 OpenAI Base URL 指向本 Worker。
+Cursor **没有**公开的 Chat Completions 接口。官方 `crsr_` Key 走的是 Cloud Agents / 管理 API，不是 `POST /v1/chat/completions`。本项目**不会**去对接 Cursor 内部推理接口。把 Cursor 当**客户端**连本站可以：覆盖 OpenAI Base URL 指向本 Worker。上游若要用 OpenAI 兼容的 Cursor 中转，写进 `PROVIDERS` 即可。
 
 ## 本地
 
 ```bash
 npm install
 cp .dev.vars.example .dev.vars
-# 编辑 .dev.vars：ADMIN_TOKEN、OPENCODE_API_KEY、可选 CURSOR_API_KEY
+# 编辑 .dev.vars：ADMIN_TOKEN，以及 PROVIDERS 里每个 id 的 {ID}_API_KEY
 npx wrangler types
 npm run check
 npm run dev
@@ -57,8 +53,7 @@ npx wrangler deploy
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN
-npx wrangler secret put OPENCODE_API_KEY
-npx wrangler secret put CURSOR_API_KEY   # 没有就跳过
+npx wrangler secret put GROK_API_KEY   # 与 PROVIDERS 的 id 对应，没有的上游跳过
 ```
 
 改完非密钥配置后再 `npx wrangler deploy`。
@@ -68,19 +63,14 @@ npx wrangler secret put CURSOR_API_KEY   # 没有就跳过
 | 位置 | 名字 | 说明 |
 | --- | --- | --- |
 | Secret | `ADMIN_TOKEN` | 管理后台口令 |
-| Secret | `OPENCODE_API_KEY` | OpenCode Zen / Console Key |
-| Secret | `CURSOR_API_KEY` | OpenAI 兼容的 Cursor 上游 Key |
-| Secret | `{ID}_API_KEY` | `EXTRA_PROVIDERS` 里每个 `id` 对应一把 Key |
-| var | `OPENCODE_BASE_URL` | 默认 `https://opencode.ai/zen/v1` |
-| var | `CURSOR_BASE_URL` | 你的 Cursor 兼容网关，没有就留空 |
-| var | `DEFAULT_PROVIDER` | 没写模型前缀时走谁，默认 `opencode` |
-| var | `EXTRA_PROVIDERS` | JSON 数组，加更多上游 |
+| Secret | `{ID}_API_KEY` | `PROVIDERS` 里每个 `id` 对应一把 Key |
+| var | `PROVIDERS` | JSON 数组，上游账号列表。没写模型前缀时走第一个配了密钥的 |
 | var | `MODEL_ALIASES` | JSON 对象，例如 `{"gpt-4":"opencode/gpt-5.4"}` |
 | var | `DEFAULT_QUOTA_TOKENS` | 签发 Key 的默认 token 额度，默认 `1000000`；`0` 表示不限额 |
 
 加一个 OpenAI 官方上游示例：
 
-`wrangler.jsonc` 的 `EXTRA_PROVIDERS`：
+`wrangler.jsonc` 的 `PROVIDERS`：
 
 ```json
 [{"id":"openai","baseUrl":"https://api.openai.com/v1"}]

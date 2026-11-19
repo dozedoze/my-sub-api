@@ -424,7 +424,7 @@ function renderStatus(status) {
     sel.appendChild(opt);
     return p.id + (p.blacklist ? " 拉黑" : p.configured ? " ✓" : " ✗") + "  " + p.baseUrl;
   });
-  document.getElementById("providers").textContent = bits.join("  ·  ") || "还没有可用上游。配 {ID}_API_KEY，或 EXTRA_PROVIDERS 再配对应密钥。";
+  document.getElementById("providers").textContent = bits.join("  ·  ") || "还没有可用上游。在 PROVIDERS 里加账号，再配对应的 {ID}_API_KEY。";
   renderProviderUsage(status.providers || []);
 }
 

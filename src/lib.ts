@@ -21,7 +21,7 @@ export type ProviderPublic = {
   configured: boolean;
 };
 
-export type ExtraProvider = {
+export type ProviderConfig = {
   id: string;
   baseUrl: string;
 };
@@ -112,13 +112,13 @@ export function parseJsonObject(raw: unknown): Record<string, string> {
   return out;
 }
 
-export function parseExtraProviders(raw: unknown): ExtraProvider[] {
+export function parseProviders(raw: unknown): ProviderConfig[] {
   const value = decodeJsonVar(raw);
   if (value == null) return [];
   if (!Array.isArray(value)) {
-    throw new GatewayError(500, "config_error", "EXTRA_PROVIDERS must be a JSON array");
+    throw new GatewayError(500, "config_error", "PROVIDERS must be a JSON array");
   }
-  const out: ExtraProvider[] = [];
+  const out: ProviderConfig[] = [];
   for (const item of value) {
     if (!item || typeof item !== "object") continue;
     const rec = item as Record<string, unknown>;
@@ -140,39 +140,20 @@ export function providerSecret(env: object, id: string): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-export function providerConfigs(
-  env: {
-    OPENCODE_BASE_URL?: string;
-    CURSOR_BASE_URL?: string;
-    EXTRA_PROVIDERS?: unknown;
-  },
-): { id: string; baseUrl: string }[] {
-  const list: { id: string; baseUrl: string }[] = [
-    {
-      id: "opencode",
-      baseUrl: (env.OPENCODE_BASE_URL?.trim() || "https://opencode.ai/zen/v1").replace(/\/+$/, ""),
-    },
-  ];
-  const cursorUrl = env.CURSOR_BASE_URL?.trim();
-  if (cursorUrl) {
-    list.push({ id: "cursor", baseUrl: cursorUrl.replace(/\/+$/, "") });
-  }
-  for (const extra of parseExtraProviders(env.EXTRA_PROVIDERS)) {
-    if (extra.id === "opencode" || extra.id === "cursor") continue;
-    list.push({ id: extra.id, baseUrl: extra.baseUrl.replace(/\/+$/, "") });
-  }
-  return list;
+export function providerConfigs(env: { PROVIDERS?: unknown }): { id: string; baseUrl: string }[] {
+  return parseProviders(env.PROVIDERS).map((p) => ({
+    id: p.id,
+    baseUrl: p.baseUrl.replace(/\/+$/, ""),
+  }));
 }
 
-export function loadProviders(env: object & {
-  OPENCODE_BASE_URL?: string;
-  CURSOR_BASE_URL?: string;
-  EXTRA_PROVIDERS?: unknown;
-}): { live: Provider[]; publicList: ProviderPublic[] } {
-  const configs = providerConfigs(env);
+export function loadProviders(env: object & { PROVIDERS?: unknown }): {
+  live: Provider[];
+  publicList: ProviderPublic[];
+} {
   const live: Provider[] = [];
   const publicList: ProviderPublic[] = [];
-  for (const cfg of configs) {
+  for (const cfg of providerConfigs(env)) {
     const apiKey = providerSecret(env, cfg.id);
     publicList.push({ id: cfg.id, baseUrl: cfg.baseUrl, configured: Boolean(apiKey) });
     if (apiKey) live.push({ ...cfg, apiKey });

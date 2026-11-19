@@ -231,7 +231,7 @@ async function adminApi(request: Request, env: Env, path: string): Promise<Respo
       }),
     );
     return Response.json(
-      { providers, defaultProvider: env.DEFAULT_PROVIDER, defaultQuotaTokens: fallbackQuota },
+      { providers, defaultProvider: live[0]?.id, defaultQuotaTokens: fallbackQuota },
       { headers: corsHeaders() },
     );
   }
@@ -357,7 +357,7 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
   const map = new Map(live.map((p) => [p.id, p]));
   const blocked = new Set(Object.keys(await loadUpstreamBans(env.KEYS)));
   const aliases = parseJsonObject(env.MODEL_ALIASES);
-  const defaultProvider = env.DEFAULT_PROVIDER?.trim() || live[0]?.id || "opencode";
+  const defaultProvider = live[0]?.id ?? "";
 
   if (rest === "models" && request.method === "GET") {
     if (issued.provider && blocked.has(issued.provider)) {

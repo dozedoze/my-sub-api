@@ -289,6 +289,7 @@ const saved = sessionStorage.getItem("admin_token");
 if (saved) tokenEl.value = saved;
 let defaultQuota = 1000000;
 let modelHint = "上游模型 ID";
+const goneIds = new Set();
 
 function fmtTokens(n) {
   if (n == null) return "不限";
@@ -527,6 +528,7 @@ async function reload() {
   const tb = document.getElementById("rows");
   tb.replaceChildren();
   for (const k of data.keys || []) {
+    if (goneIds.has(k.id)) continue;
     const tr = document.createElement("tr");
     const nameTd = document.createElement("td");
     nameTd.textContent = k.name;
@@ -619,7 +621,8 @@ async function reload() {
       if (!confirm("删除后该 Key 立刻失效，且无法找回明文。")) return;
       await withBusy(del, async () => {
         await api("/admin/api/keys/" + k.id, { method: "DELETE" });
-        await reload();
+        goneIds.add(k.id);
+        tr.remove();
       });
     };
     td.append(rev, del);

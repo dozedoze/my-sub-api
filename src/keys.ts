@@ -54,15 +54,10 @@ export async function lookupByPlaintext(kv: KVNamespace, plaintext: string): Pro
 export async function listIssuedKeys(kv: KVNamespace): Promise<KeyPublic[]> {
   const out: KeyPublic[] = [];
   let cursor: string | undefined;
-  // ponytail: KV list 最终一致，签发后别的 POP 最多约 60s 才看得到。要强一致再换 D1。
+  // ponytail: KV list 最终一致，元数据会脏。GET 同一 colo 马上看到删改；签发后别的 POP 最多约 60s 才进 list。要强一致再换 D1。
   do {
     const page = await kv.list({ prefix: ID_PREFIX, cursor });
     for (const entry of page.keys) {
-      const meta = entry.metadata as KeyPublic | undefined;
-      if (meta?.id) {
-        out.push(meta);
-        continue;
-      }
       const rec = await kv.get<KeyRecord>(entry.name, "json");
       if (rec) out.push(toPublicKey(rec));
     }

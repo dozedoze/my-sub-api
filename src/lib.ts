@@ -89,9 +89,19 @@ export function upstreamRestPath(pathname: string): string | null {
   return rest;
 }
 
-export function parseJsonObject(raw: string | undefined): Record<string, string> {
-  if (!raw?.trim()) return {};
-  const value: unknown = JSON.parse(raw);
+/** wrangler vars 可以是 JSON 绑定，也可以是旧的 JSON 字符串。 */
+function decodeJsonVar(raw: unknown): unknown {
+  if (raw == null) return undefined;
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    return s ? JSON.parse(s) : undefined;
+  }
+  return raw;
+}
+
+export function parseJsonObject(raw: unknown): Record<string, string> {
+  const value = decodeJsonVar(raw);
+  if (value == null) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new GatewayError(500, "config_error", "MODEL_ALIASES must be a JSON object");
   }
@@ -102,9 +112,9 @@ export function parseJsonObject(raw: string | undefined): Record<string, string>
   return out;
 }
 
-export function parseExtraProviders(raw: string | undefined): ExtraProvider[] {
-  if (!raw?.trim()) return [];
-  const value: unknown = JSON.parse(raw);
+export function parseExtraProviders(raw: unknown): ExtraProvider[] {
+  const value = decodeJsonVar(raw);
+  if (value == null) return [];
   if (!Array.isArray(value)) {
     throw new GatewayError(500, "config_error", "EXTRA_PROVIDERS must be a JSON array");
   }
@@ -134,7 +144,7 @@ export function providerConfigs(
   env: {
     OPENCODE_BASE_URL?: string;
     CURSOR_BASE_URL?: string;
-    EXTRA_PROVIDERS?: string;
+    EXTRA_PROVIDERS?: unknown;
   },
 ): { id: string; baseUrl: string }[] {
   const list: { id: string; baseUrl: string }[] = [
@@ -157,7 +167,7 @@ export function providerConfigs(
 export function loadProviders(env: object & {
   OPENCODE_BASE_URL?: string;
   CURSOR_BASE_URL?: string;
-  EXTRA_PROVIDERS?: string;
+  EXTRA_PROVIDERS?: unknown;
 }): { live: Provider[]; publicList: ProviderPublic[] } {
   const configs = providerConfigs(env);
   const live: Provider[] = [];

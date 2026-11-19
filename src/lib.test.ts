@@ -51,10 +51,20 @@ test("joinUrl and v1 stripping", () => {
 
 test("parse config JSON", () => {
   assert.deepEqual(parseExtraProviders(""), []);
+  assert.deepEqual(parseExtraProviders(undefined), []);
+  assert.deepEqual(parseExtraProviders([]), []);
   assert.deepEqual(parseExtraProviders('[{"id":" openai ","baseUrl":" https://api.openai.com/v1 "}]'), [
     { id: "openai", baseUrl: "https://api.openai.com/v1" },
   ]);
+  assert.deepEqual(parseExtraProviders([{ id: " grok ", baseUrl: " https://api.x.ai/v1 " }]), [
+    { id: "grok", baseUrl: "https://api.x.ai/v1" },
+  ]);
   assert.deepEqual(parseJsonObject('{"gpt-4":"opencode/gpt-5.4"}'), { "gpt-4": "opencode/gpt-5.4" });
+  assert.deepEqual(parseJsonObject({ "gpt-4": "opencode/gpt-5.4" }), { "gpt-4": "opencode/gpt-5.4" });
+  assert.throws(
+    () => parseExtraProviders({ id: "grok" }),
+    (err: unknown) => err instanceof GatewayError && err.code === "config_error",
+  );
 });
 
 test("pickUpstream default + prefix + alias", () => {

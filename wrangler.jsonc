@@ -19,7 +19,10 @@
   "vars": {
     // 上游列表。对应 secret 为 {ID}_API_KEY
     // 同一 baseUrl 的多个 id 视为同厂商账号池，会轮询；429 换号，401/403 拉黑后换号
-    "PROVIDERS": [{"id":"grok","baseUrl":"https://api.x.ai/v1"}],
+    "PROVIDERS": [
+      {"id":"grok","baseUrl":"https://api.x.ai/v1"},
+      {"id":"deepseek","baseUrl":"https://api.deepseek.com/v1"}
+    ],
     // 模型别名，例如 {"gpt-4":"opencode/gpt-5.4","composer":"cursor/composer-2.5"}
     "MODEL_ALIASES": {},
     // 签发使用者 Key 时的默认 token 额度，0 表示不限额

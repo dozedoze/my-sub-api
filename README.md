@@ -53,7 +53,8 @@ npx wrangler deploy
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN
-npx wrangler secret put GROK_API_KEY   # 与 PROVIDERS 的 id 对应，没有的上游跳过
+npx wrangler secret put GROK_API_KEY
+npx wrangler secret put DEEPSEEK_API_KEY
 ```
 
 改完非密钥配置后再 `npx wrangler deploy`。

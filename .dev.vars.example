@@ -6,3 +6,4 @@ ADMIN_TOKEN=change-me-to-a-long-random-string
 
 # PROVIDERS 里每个 id 对应一把 Key，例如 grok → GROK_API_KEY
 GROK_API_KEY=
+DEEPSEEK_API_KEY=

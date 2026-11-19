@@ -23,7 +23,9 @@ export function adminHtml(origin: string): string {
       color: var(--text);
     }
     main { max-width: 1040px; margin: 0 auto; padding: 32px 20px 80px; }
-    h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -.02em; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: -.02em; }
+    .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+    .page-head #logout { flex: 0 0 auto; }
     .sub { color: var(--muted); margin-bottom: 24px; }
     .card {
       background: var(--card); border: 1px solid var(--line);
@@ -189,7 +191,10 @@ export function adminHtml(origin: string): string {
 </head>
 <body>
 <main>
-  <h1>my-sub-api</h1>
+  <div class="page-head">
+    <h1>my-sub-api</h1>
+    <button class="ghost" type="button" id="logout" hidden>退出</button>
+  </div>
   <p class="sub">签发代理 Key。上游 API Key 只存在 Cloudflare Secrets 里，不会下发给使用者。</p>
 
   <section class="card" id="login-card">
@@ -221,7 +226,6 @@ export function adminHtml(origin: string): string {
         <strong>已签发</strong>
         <button type="button" id="open-create">新建使用者 Key</button>
         <button class="ghost" type="button" id="refresh"><span class="ico" aria-hidden="true">↻</span>刷新</button>
-        <button class="ghost" type="button" id="logout">退出</button>
       </div>
       <div class="keys-wrap">
         <table class="keys">
@@ -291,6 +295,8 @@ sessionStorage.removeItem("admin_token");
 let defaultQuota = 1000000;
 let modelHint = "上游模型 ID";
 const goneIds = new Set();
+const pendingKeys = new Map();
+let lastKeys = [];
 
 function fmtTokens(n) {
   if (n == null) return "不限";
@@ -373,6 +379,7 @@ async function enter(status) {
   document.getElementById("login-err").textContent = "";
   show(document.getElementById("login-card"), false);
   show(document.getElementById("app"), true);
+  show(document.getElementById("logout"), true);
   renderStatus(status);
   await reload();
 }
@@ -380,11 +387,13 @@ async function enter(status) {
 document.getElementById("login").onclick = async () => {
   const err = document.getElementById("login-err");
   err.textContent = "";
-  try {
-    await enter(await api("/admin/api/status"));
-  } catch (e) {
-    err.textContent = e.message || String(e);
-  }
+  await withBusy(document.getElementById("login"), async () => {
+    try {
+      await enter(await api("/admin/api/status"));
+    } catch (e) {
+      err.textContent = e.message || String(e);
+    }
+  });
 };
 
 api("/admin/api/status").then(enter).catch(() => {});
@@ -396,6 +405,7 @@ document.getElementById("logout").onclick = async () => {
   });
   tokenEl.value = "";
   show(document.getElementById("app"), false);
+  show(document.getElementById("logout"), false);
   show(document.getElementById("login-card"), true);
   tokenEl.focus();
 };
@@ -545,15 +555,46 @@ document.getElementById("copy-base").onclick = async () => {
   }
 };
 
+function asKeyView(k) {
+  const quota = typeof k.quotaTokens === "number" ? k.quotaTokens : defaultQuota;
+  const used = k.usedTokens || 0;
+  return {
+    id: k.id,
+    name: k.name,
+    prefix: k.prefix,
+    enabled: k.enabled !== false,
+    createdAt: k.createdAt || Date.now(),
+    provider: k.provider,
+    quotaTokens: quota,
+    usedTokens: used,
+    requestCount: k.requestCount || 0,
+    remainingTokens: quota === 0 ? null : Math.max(0, quota - used),
+  };
+}
+
+function withPending(listed) {
+  const extra = [];
+  for (const k of pendingKeys.values()) {
+    if (!listed.some((x) => x.id === k.id) && !goneIds.has(k.id)) extra.push(k);
+  }
+  if (!extra.length) return listed;
+  return [...extra, ...listed].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
 async function reload() {
-  const [data, status] = await Promise.all([
-    api("/admin/api/keys"),
-    api("/admin/api/status"),
-  ]);
-  renderProviderUsage(status.providers || []);
+  const keysP = api("/admin/api/keys");
+  const statusP = api("/admin/api/status");
+  const listed = (await keysP).keys || [];
+  for (const k of listed) pendingKeys.delete(k.id);
+  paintKeyRows(withPending(listed));
+  renderProviderUsage((await statusP).providers || []);
+}
+
+function paintKeyRows(keys) {
+  lastKeys = keys;
   const tb = document.getElementById("rows");
   tb.replaceChildren();
-  for (const k of data.keys || []) {
+  for (const k of keys) {
     if (goneIds.has(k.id)) continue;
     const tr = document.createElement("tr");
     const nameTd = document.createElement("td");
@@ -648,6 +689,7 @@ async function reload() {
       await withBusy(del, async () => {
         await api("/admin/api/keys/" + k.id, { method: "DELETE" });
         goneIds.add(k.id);
+        pendingKeys.delete(k.id);
         tr.remove();
       });
     };
@@ -780,7 +822,6 @@ document.getElementById("how-tabs").onclick = (e) => {
 
 document.getElementById("create").onclick = async () => {
   const err = document.getElementById("create-err");
-  const btn = document.getElementById("create");
   err.textContent = "";
   const q = document.getElementById("quota").value.trim();
   const body = {
@@ -788,24 +829,25 @@ document.getElementById("create").onclick = async () => {
     provider: document.getElementById("provider").value || undefined,
     quotaTokens: q === "" ? undefined : Number(q),
   };
-  btn.disabled = true;
-  try {
-    const data = await api("/admin/api/keys", { method: "POST", body: JSON.stringify(body) });
-    lastPlain = data.key;
-    document.getElementById("once-key").textContent = data.key;
-    document.getElementById("once-base").textContent = ORIGIN + "/v1";
-    for (const el of document.getElementById("how-tabs").querySelectorAll(".tab")) {
-      el.classList.toggle("on", el.dataset.tab === "workbuddy");
+  await withBusy(document.getElementById("create"), async () => {
+    try {
+      const data = await api("/admin/api/keys", { method: "POST", body: JSON.stringify(body) });
+      lastPlain = data.key;
+      document.getElementById("once-key").textContent = data.key;
+      document.getElementById("once-base").textContent = ORIGIN + "/v1";
+      for (const el of document.getElementById("how-tabs").querySelectorAll(".tab")) {
+        el.classList.toggle("on", el.dataset.tab === "workbuddy");
+      }
+      renderHow("workbuddy");
+      pendingKeys.set(data.id, asKeyView(data));
+      paintKeyRows(withPending(lastKeys));
+      dlg.close();
+      onceDlg.showModal();
+      await reload();
+    } catch (e) {
+      err.textContent = e.message || String(e);
     }
-    renderHow("workbuddy");
-    dlg.close();
-    onceDlg.showModal();
-    await reload();
-  } catch (e) {
-    err.textContent = e.message || String(e);
-  } finally {
-    btn.disabled = false;
-  }
+  });
 };
 </script>
 </body>

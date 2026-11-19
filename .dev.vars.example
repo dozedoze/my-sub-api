@@ -7,6 +7,8 @@ ADMIN_TOKEN=change-me-to-a-long-random-string
 # PROVIDERS 里每个 id 对应一把 Key，例如 grok → GROK_API_KEY
 GROK_API_KEY=
 DEEPSEEK_API_KEY=
+# OpenCode Go 订阅。不要填到 https://opencode.ai/zen/v1（那是按量另扣）
+OPENCODE_API_KEY=
 
 # grok 的 quota.secret / ${GROK_TEAM_ID}。推理 Key 不能查余额。
 GROK_MANAGEMENT_KEY=

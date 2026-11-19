@@ -176,6 +176,29 @@ export function adminHtml(origin: string): string {
       padding: 4px 8px; font-weight: 500; font-size: 12px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
+    button.chip:active { transform: none; }
+    button.chip:focus,
+    button.chip:focus-visible { outline: none; }
+    button.chip.copied,
+    button.chip.fail {
+      animation: none;
+      color: transparent !important;
+    }
+    button.chip.copied::after,
+    button.chip.fail::after {
+      content: attr(data-tip);
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      font-weight: 650;
+    }
+    button.chip.copied::after { color: var(--accent); }
+    button.chip.fail {
+      background: #2a1c16 !important;
+      border-color: var(--danger) !important;
+    }
+    button.chip.fail::after { color: var(--danger); }
     .secret {
       background: #07150f; border: 1px dashed #2f9e75; border-radius: 10px;
       padding: 12px; word-break: break-all; margin: 0 0 16px;
@@ -218,7 +241,7 @@ export function adminHtml(origin: string): string {
       </div>
       <p class="hint" id="providers" style="margin:12px 0 0"></p>
       <p class="hint">同一 Base URL 的多个上游账号会轮询。上游 429 换号；401 / 403 会拉黑该账号再换号。签发 Key 锁死的上游不参与轮询。</p>
-      <div id="provider-usage" style="margin-top:12px;overflow:auto"></div>
+      <div id="provider-usage" style="margin-top:12px"></div>
     </section>
 
     <section class="card">
@@ -429,10 +452,10 @@ function renderStatus(status) {
   const bits = (status.providers || []).map((p) => {
     const opt = document.createElement("option");
     opt.value = p.id;
-    opt.textContent = p.blacklist ? p.id + "（已拉黑）" : p.configured ? p.id : p.id + "（未配置密钥）";
+    opt.textContent = p.blacklist ? p.id + "（已拉黑）" : p.note ? p.id + "（已停用）" : p.configured ? p.id : p.id + "（未配置密钥）";
     opt.disabled = !p.configured || Boolean(p.blacklist);
     sel.appendChild(opt);
-    return p.id + (p.blacklist ? " 拉黑" : p.configured ? " ✓" : " ✗") + "  " + p.baseUrl;
+    return p.id + (p.blacklist ? " 拉黑" : p.note ? " 停用 " + p.note : p.configured ? " ✓" : " ✗") + "  " + p.baseUrl;
   });
   document.getElementById("providers").textContent = bits.join("  ·  ") || "还没有可用上游。在 PROVIDERS 里加账号，再配对应的 {ID}_API_KEY。";
   renderProviderUsage(status.providers || []);
@@ -474,22 +497,35 @@ function renderProviderUsage(providers) {
     req.textContent = String(p.localRequests || 0);
     const up = document.createElement("td");
     const u = p.upstream;
+    let text = "";
+    let muted = false;
     if (p.blacklist) {
-      up.className = "hint";
-      up.textContent = p.blacklist.reason || "已拉黑";
-      up.title = up.textContent;
+      muted = true;
+      text = p.blacklist.reason || "已拉黑";
     } else if (u && u.ok && u.label) {
-      up.textContent = u.label;
-      up.title = u.note || u.label;
+      text = u.label;
     } else if (u && u.ok && typeof u.balanceUsd === "number") {
-      up.textContent = "$" + u.balanceUsd.toFixed(2);
+      text = "$" + u.balanceUsd.toFixed(2);
     } else if (u && u.ok && u.windows && u.windows.length) {
-      up.textContent = u.windows.map((w) => w.name + "剩 " + Math.round(w.remainingPercent) + "%").join(" · ");
+      text = u.windows.map((w) => w.name + "剩 " + Math.round(w.remainingPercent) + "%").join(" · ");
     } else {
-      up.className = "hint";
-      up.textContent = (u && u.note) || (p.configured ? "该上游没有余额查询接口" : "未配置密钥");
-      up.title = up.textContent;
+      muted = true;
+      text = (u && u.note) || (p.configured ? "该上游没有余额查询接口" : "未配置密钥");
     }
+    if (!p.blacklist && u && typeof u.usedTokens === "number") {
+      const bit = "累计 " + fmtTokens(u.usedTokens);
+      if (muted) {
+        muted = false;
+        text = bit;
+      } else if (text) {
+        text += " · " + bit;
+      } else {
+        text = bit;
+      }
+    }
+    if (muted) up.className = "hint";
+    up.textContent = text;
+    up.title = (u && u.note) || text;
     const act = document.createElement("td");
     if (p.configured) {
       const btn = document.createElement("button");
@@ -532,10 +568,16 @@ function renderProviderUsage(providers) {
         chip.onclick = async () => {
           try {
             await navigator.clipboard.writeText(id);
+            chip.dataset.tip = "已复制";
+            chip.classList.remove("fail");
             chip.classList.add("copied");
-            clearTimeout(chip._flash);
-            chip._flash = setTimeout(() => chip.classList.remove("copied"), 1200);
-          } catch { /* ignore */ }
+          } catch {
+            chip.dataset.tip = "复制失败";
+            chip.classList.remove("copied");
+            chip.classList.add("fail");
+          }
+          clearTimeout(chip._flash);
+          chip._flash = setTimeout(() => chip.classList.remove("copied", "fail"), 1400);
         };
         chips.appendChild(chip);
       }

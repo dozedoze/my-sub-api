@@ -34,6 +34,11 @@
         "id": "deepseek",
         "baseUrl": "https://api.deepseek.com/v1",
         "quota": { "url": "https://api.deepseek.com/user/balance" }
+      },
+      {
+        "id": "opencode",
+        "baseUrl": "https://opencode.ai/zen/go/v1",
+        "quota": { "url": "/zen/go/v1/usage" }
       }
     ],
     // 模型别名，例如 {"gpt-4":"opencode/gpt-5.4","composer":"cursor/composer-2.5"}

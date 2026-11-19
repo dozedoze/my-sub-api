@@ -33,6 +33,8 @@ export type ProviderPublic = {
   id: string;
   baseUrl: string;
   configured: boolean;
+  /** 配了额外付费地址时写原因，这种上游不会进入转发。 */
+  note?: string;
 };
 
 export type ProviderConfig = {
@@ -179,6 +181,46 @@ export function providerConfigs(env: { PROVIDERS?: unknown }): ProviderConfig[] 
   }));
 }
 
+/** 比套餐价 / 全球价多扣钱的地址。返回 null 表示可以走。 */
+export function extraPaidChannel(baseUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (host === "us.api.x.ai") return "美国区域端点比全球价贵 10%，已停用";
+  if (host === "opencode.ai" || host.endsWith(".opencode.ai")) {
+    if (path.startsWith("/zen/go") || path.startsWith("/inference/go")) return null;
+    if (path.startsWith("/zen") || path.startsWith("/inference")) {
+      return "这是按量付费地址，已停用。订阅用 https://opencode.ai/zen/go/v1";
+    }
+  }
+  return null;
+}
+
+export function isGoSubscription(baseUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  const host = url.hostname.toLowerCase();
+  if (host !== "opencode.ai" && !host.endsWith(".opencode.ai")) return false;
+  const path = url.pathname.replace(/\/+$/, "");
+  return path.startsWith("/zen/go") || path.startsWith("/inference/go");
+}
+
+/** Go 套餐窗口已满时，付费模型再打就会落到 Extra Usage。免费模型不占额度。 */
+export function goAllowanceBlocks(json: unknown, model: string): boolean {
+  if (/(^|[-_/])free($|[-_/])/i.test(model)) return false;
+  const parsed = parseOpencodeGoUsage(json);
+  return Boolean(parsed?.windows?.some((w) => w.percent >= 100));
+}
+
 export function loadProviders(env: object & { PROVIDERS?: unknown }): {
   live: Provider[];
   publicList: ProviderPublic[];
@@ -187,8 +229,14 @@ export function loadProviders(env: object & { PROVIDERS?: unknown }): {
   const publicList: ProviderPublic[] = [];
   for (const cfg of providerConfigs(env)) {
     const apiKey = providerSecret(env, cfg.id);
-    publicList.push({ id: cfg.id, baseUrl: cfg.baseUrl, configured: Boolean(apiKey) });
-    if (apiKey) live.push({ ...cfg, apiKey, ...bindQuota(env, cfg.quota, apiKey) });
+    const surcharge = extraPaidChannel(cfg.baseUrl);
+    publicList.push({
+      id: cfg.id,
+      baseUrl: cfg.baseUrl,
+      configured: Boolean(apiKey) && !surcharge,
+      ...(surcharge ? { note: surcharge } : {}),
+    });
+    if (apiKey && !surcharge) live.push({ ...cfg, apiKey, ...bindQuota(env, cfg.quota, apiKey) });
   }
   return { live, publicList };
 }
@@ -416,7 +464,74 @@ export type UpstreamProbe = {
   label?: string;
   windows?: UpstreamWindow[];
   balanceUsd?: number;
+  /** xAI 账单里的 token 合计，含没经过本站的调用。 */
+  usedTokens?: number;
+  usageIncomplete?: boolean;
 };
+
+/** 预付余额地址换成同团队的用量统计。其它上游没有这个接口。 */
+export function xaiUsageUrl(balanceUrl: string): string | null {
+  try {
+    const url = new URL(balanceUrl);
+    if (url.hostname !== "management-api.x.ai") return null;
+    if (!url.pathname.endsWith("/prepaid/balance")) return null;
+    url.pathname = url.pathname.replace(/\/prepaid\/balance$/, "/usage");
+    url.search = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function gmtDay(d: Date): string {
+  return d.toISOString().slice(0, 10) + " 00:00:00";
+}
+
+/** 从 2024-01-01 到明天 0 点，整段合成一个桶。ponytail: 起点写死，要改窗口再加配置。 */
+export function xaiUsageBody(now = new Date(), timeUnit = "TIME_UNIT_NONE"): Record<string, unknown> {
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  return {
+    analyticsRequest: {
+      timeRange: {
+        startTime: "2024-01-01 00:00:00",
+        endTime: gmtDay(end),
+        timezone: "Etc/GMT",
+      },
+      timeUnit,
+      values: [{ name: "units", aggregation: "AGGREGATION_SUM" }],
+      groupBy: ["unit_type"],
+      filters: [],
+    },
+  };
+}
+
+/** 把用量时间序列里的 token 单位加总。有 token 分组时忽略图片、音频这类单位。 */
+export function sumTokenUnits(json: unknown): { tokens: number; incomplete: boolean } | null {
+  if (!json || typeof json !== "object") return null;
+  const rec = json as Record<string, unknown>;
+  const series = rec.timeSeries ?? rec.time_series;
+  if (!Array.isArray(series)) return null;
+  const rows = series.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+  const tokenRows = rows.filter((row) => {
+    const group = Array.isArray(row.group) ? row.group : [];
+    return group.some((g) => typeof g === "string" && /token/i.test(g));
+  });
+  let total = 0;
+  for (const row of tokenRows.length ? tokenRows : rows) {
+    const points = row.dataPoints ?? row.data_points;
+    if (!Array.isArray(points)) continue;
+    for (const pt of points) {
+      if (!pt || typeof pt !== "object") continue;
+      const values = (pt as { values?: unknown }).values;
+      const n = Array.isArray(values) ? values[0] : undefined;
+      if (typeof n === "number" && Number.isFinite(n) && n > 0) total += n;
+    }
+  }
+  return {
+    tokens: Math.round(total),
+    incomplete: rec.limitReached === true || rec.limit_reached === true,
+  };
+}
 
 function asPercent(n: unknown): number | null {
   if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return null;

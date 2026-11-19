@@ -25,7 +25,13 @@ import {
   parseQuotaPayload,
   parseQuotaInput,
   resolveQuotaUrl,
+  sumTokenUnits,
+  xaiUsageBody,
+  xaiUsageUrl,
   pickUpstream,
+  extraPaidChannel,
+  goAllowanceBlocks,
+  isGoSubscription,
   loadProviders,
   mintAdminSession,
   readCookie,
@@ -151,6 +157,33 @@ test("providers come only from PROVIDERS", () => {
   });
   assert.equal(missing.live[0].quotaKey, "");
   assert.equal(missing.live[0].quotaError, "额度地址缺少 GROK_TEAM_ID");
+});
+
+test("extra paid channels stay offline", () => {
+  assert.equal(extraPaidChannel("https://opencode.ai/zen/go/v1"), null);
+  assert.equal(extraPaidChannel("https://api.x.ai/v1"), null);
+  assert.equal(extraPaidChannel("https://api.deepseek.com/v1"), null);
+  assert.equal(isGoSubscription("https://opencode.ai/zen/go/v1"), true);
+  assert.equal(isGoSubscription("https://opencode.ai/zen/v1"), false);
+  assert.match(extraPaidChannel("https://opencode.ai/zen/v1") ?? "", /按量/);
+  assert.match(extraPaidChannel("https://us.api.x.ai/v1") ?? "", /美国/);
+  assert.equal(goAllowanceBlocks({ usage: { monthly: { percent: 100 } } }, "glm-5.3"), true);
+  assert.equal(goAllowanceBlocks({ usage: { monthly: { percent: 100 } } }, "hy4-flash-free"), false);
+  assert.equal(goAllowanceBlocks({ usage: { monthly: { percent: 40 } } }, "glm-5.3"), false);
+
+  const got = loadProviders({
+    PROVIDERS: [
+      { id: "opencode", baseUrl: "https://opencode.ai/zen/v1" },
+      { id: "grok-us", baseUrl: "https://us.api.x.ai/v1" },
+      { id: "opencode-go", baseUrl: "https://opencode.ai/zen/go/v1" },
+    ],
+    OPENCODE_API_KEY: "a",
+    GROK_US_API_KEY: "b",
+    OPENCODE_GO_API_KEY: "c",
+  });
+  assert.deepEqual(got.live.map((p) => p.id), ["opencode-go"]);
+  assert.equal(got.publicList[0].configured, false);
+  assert.match(got.publicList[0].note ?? "", /按量/);
 });
 
 test("pickUpstream default + prefix + alias", () => {
@@ -401,6 +434,28 @@ test("quota helpers and usage parse", () => {
   );
   assert.equal(parseQuotaPayload({ account: { credit: "8.5" } })?.label, "credit 8.50");
   assert.equal(parseQuotaPayload({ nope: true }), null);
+  assert.equal(
+    xaiUsageUrl("https://management-api.x.ai/v1/billing/teams/team_1/prepaid/balance"),
+    "https://management-api.x.ai/v1/billing/teams/team_1/usage",
+  );
+  assert.equal(xaiUsageUrl("https://api.deepseek.com/user/balance"), null);
+  const usageBody = xaiUsageBody(new Date("2026-11-19T08:00:00Z")) as {
+    analyticsRequest: { timeRange: { endTime: string }; timeUnit: string };
+  };
+  assert.equal(usageBody.analyticsRequest.timeUnit, "TIME_UNIT_NONE");
+  assert.equal(usageBody.analyticsRequest.timeRange.endTime, "2026-11-20 00:00:00");
+  assert.deepEqual(
+    sumTokenUnits({
+      timeSeries: [
+        { group: ["Prompt text tokens"], dataPoints: [{ values: [100] }, { values: [25.4] }] },
+        { group: ["Completion text tokens"], dataPoints: [{ values: [10] }] },
+        { group: ["Images"], dataPoints: [{ values: [999] }] },
+      ],
+    }),
+    { tokens: 135, incomplete: false },
+  );
+  assert.deepEqual(sumTokenUnits({ timeSeries: [], limitReached: true }), { tokens: 0, incomplete: true });
+  assert.equal(sumTokenUnits({ usage: { monthly: { percent: 1 } } }), null);
   assert.equal(resolveQuotaUrl("https://api.deepseek.com/v1", "/user/balance"), "https://api.deepseek.com/user/balance");
   assert.equal(resolveQuotaUrl("https://api.deepseek.com/v1", "file:///etc/passwd"), null);
 });

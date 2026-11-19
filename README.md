@@ -55,6 +55,7 @@ npx wrangler deploy
 npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put GROK_API_KEY
 npx wrangler secret put DEEPSEEK_API_KEY
+npx wrangler secret put OPENCODE_API_KEY
 ```
 
 改完非密钥配置后再 `npx wrangler deploy`。
@@ -157,7 +158,7 @@ Settings → Models → 打开 Override OpenAI Base URL → 填 `https://<worker
 
 `url` 可以写完整地址，或以 `/` 开头（拼到 `baseUrl` 的源站，不含 `/v1`）。不写 `secret` 就用这把上游的 `{ID}_API_KEY`。要另一把钥匙（例如 xAI management key）时，`secret` 填环境变量名，值用 `wrangler secret put`，不要写进 jsonc。路径里的账号 id 用 `${ENV_NAME}`，同样从环境变量读。`cents: true` 表示响应里的 `total.val` 是美分。`method: "POST"` 时可带 `body`。
 
-能认出的响应：DeepSeek `balance_infos`、xAI `total.val`（美分）、OpenCode 的 `usd` / 套餐窗口百分比，以及常见的 `balance` / `credit` / `usd` 数字。没配 `quota` 且上游是 OpenCode 时，仍会试 Go 用量和钱包接口。
+能认出的响应：DeepSeek `balance_infos`、xAI `total.val`（美分）、OpenCode Go 的套餐窗口百分比，以及常见的 `balance` / `credit` / `usd` 数字。OpenCode 只接 `https://opencode.ai/zen/go/v1`（订阅）。`https://opencode.ai/zen/v1` 是按量另扣，配了也不会转发。Grok 用 `https://api.x.ai/v1`，`https://us.api.x.ai/v1` 贵 10%，同样停用。套餐窗口用满后，付费模型会被拒绝，避免落到 Extra Usage。
 
 上下文存在 Durable Object 里（强一致）。超过约 80 条或体积过大时会丢掉最旧的非 system 轮。
 

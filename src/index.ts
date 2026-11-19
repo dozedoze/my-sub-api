@@ -13,6 +13,8 @@ import {
   estimateTokens,
   extractToken,
   GatewayError,
+  goAllowanceBlocks,
+  isGoSubscription,
   joinUrl,
   mintAdminSession,
   loadProviders,
@@ -28,6 +30,9 @@ import {
   parseQuotaPayload,
   parseQuotaInput,
   resolveQuotaUrl,
+  sumTokenUnits,
+  xaiUsageBody,
+  xaiUsageUrl,
   pickUpstream,
   readCookie,
   resolveSessionId,
@@ -322,7 +327,10 @@ async function probeUpstream(provider: Provider): Promise<UpstreamProbe> {
   }
   const [go, bal] = await Promise.all([
     fetchJsonSilent(`${origin}/zen/go/v1/usage`, provider.apiKey),
-    fetchJsonSilent(`${origin}/zen/v1/balance`, provider.apiKey),
+    // 订阅地址不查 Zen 钱包。那个余额是按量另扣的。
+    isGoSubscription(provider.baseUrl)
+      ? Promise.resolve(null)
+      : fetchJsonSilent(`${origin}/zen/v1/balance`, provider.apiKey),
   ]);
   const parsedBal = parseOpencodeBalance(bal);
   const parsedGo = parseOpencodeGoUsage(go);
@@ -355,19 +363,42 @@ async function probeConfiguredQuota(provider: Provider): Promise<UpstreamProbe> 
   const url = resolveQuotaUrl(provider.baseUrl, quota.url);
   if (!url) return { ok: false, note: "额度查询地址无效" };
   const res = await fetchQuota(url, provider.quotaKey, quota.method ?? "GET", quota.body);
+  const probe = !res.ok
+    ? res.status
+      ? { ok: false as const, note: `额度接口返回 HTTP ${res.status}` }
+      : { ok: false as const, note: "额度接口请求失败" }
+    : (parseQuotaPayload(res.json, { cents: quota.cents }) ?? {
+        ok: false as const,
+        note: "额度接口有响应，但没有认出余额字段",
+      });
+  if (!res.ok && res.status) {
+    console.error(JSON.stringify({ message: "quota_probe", provider: provider.id, status: res.status }));
+  }
+  return attachXaiTokenSum(provider, url, probe);
+}
+
+async function attachXaiTokenSum(provider: Provider, balanceUrl: string, probe: UpstreamProbe): Promise<UpstreamProbe> {
+  const usageUrl = xaiUsageUrl(balanceUrl);
+  if (!usageUrl || !provider.quotaKey) return probe;
+  let res = await fetchQuota(usageUrl, provider.quotaKey, "POST", xaiUsageBody());
+  if (!res.ok && res.status === 400) {
+    res = await fetchQuota(usageUrl, provider.quotaKey, "POST", xaiUsageBody(new Date(), "TIME_UNIT_MONTH"));
+  }
   if (!res.ok) {
     if (res.status) {
-      console.error(JSON.stringify({ message: "quota_probe", provider: provider.id, status: res.status }));
-      return { ok: false, note: `额度接口返回 HTTP ${res.status}` };
+      console.error(JSON.stringify({ message: "usage_probe", provider: provider.id, status: res.status }));
     }
-    return { ok: false, note: "额度接口请求失败" };
+    return probe;
   }
-  return (
-    parseQuotaPayload(res.json, { cents: quota.cents }) ?? {
-      ok: false,
-      note: "额度接口有响应，但没有认出余额字段",
-    }
-  );
+  const sum = sumTokenUnits(res.json);
+  if (!sum) return probe;
+  const incomplete = sum.incomplete ? "累计可能不完整。" : "";
+  return {
+    ...probe,
+    usedTokens: sum.tokens,
+    ...(sum.incomplete ? { usageIncomplete: true } : {}),
+    note: `${probe.note} 累计 token 来自 xAI 账单，包含没经过本站的调用。${incomplete}`.trim(),
+  };
 }
 
 async function fetchQuota(
@@ -430,7 +461,7 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
       throw new GatewayError(503, "provider_blacklisted", `Upstream '${issued.provider}' is blacklisted`);
     }
     const targets = (issued.provider ? [map.get(issued.provider)] : live).filter(
-      (p): p is Provider => Boolean(p) && !blocked.has(p.id),
+      (p): p is Provider => p != null && !blocked.has(p.id),
     );
     return listModels(targets);
   }
@@ -524,6 +555,17 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
       headers.set("x-opencode-session", sessionId);
     }
     const more = i < ordered.length - 1;
+    if (isGoSubscription(account.baseUrl)) {
+      const usage = await fetchJsonSilent(joinUrl(account.baseUrl, "usage"), account.apiKey);
+      if (goAllowanceBlocks(usage, picked.model)) {
+        if (more) continue;
+        throw new GatewayError(
+          429,
+          "allowance_exhausted",
+          "OpenCode Go allowance is exhausted; refused so this request is not billed as extra usage",
+        );
+      }
+    }
     console.log(
       JSON.stringify({
         message: "proxy",

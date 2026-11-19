@@ -1,0 +1,14 @@
+# 复制为 .dev.vars 后填真实值。该文件已被 .gitignore 忽略。
+# 生产环境不要用这个文件，用：npx wrangler secret put <NAME>
+
+# 管理后台口令（签发 / 吊销用户 Key）
+ADMIN_TOKEN=change-me-to-a-long-random-string
+
+# OpenCode Zen / Console API Key
+OPENCODE_API_KEY=
+
+# 上游 Cursor 兼容网关的 Key（没有就留空，并保持 wrangler.jsonc 里 CURSOR_BASE_URL 为空）
+CURSOR_API_KEY=
+
+# 若 EXTRA_PROVIDERS 里加了 {"id":"openai",...}，在这里（或 wrangler secret）补：
+# OPENAI_API_KEY=

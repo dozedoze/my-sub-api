@@ -1,0 +1,290 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  GatewayError,
+  applyChatSseLine,
+  assistantFromChatCompletion,
+  attachUsage,
+  defaultQuotaTokens,
+  estimateTokens,
+  effectiveQuota,
+  joinUrl,
+  keyPrefix,
+  looksLikeFullHistory,
+  mergeSessionMessages,
+  exposeModels,
+  failoverAction,
+  parseExtraProviders,
+  parseJsonObject,
+  parseModelsResponse,
+  parseOpencodeBalance,
+  parseOpencodeGoUsage,
+  parseQuotaInput,
+  pickUpstream,
+  resolveSessionId,
+  rotateFrom,
+  secretName,
+  stripV1,
+  tokensFromUsage,
+  trimSessionMessages,
+  upstreamRestPath,
+  vendorGroups,
+  vendorPeers,
+  type Provider,
+} from "./lib.ts";
+
+function providers(...ids: string[]): Map<string, Provider> {
+  return new Map(
+    ids.map((id) => [id, { id, baseUrl: `https://${id}.example/v1`, apiKey: "k" }]),
+  );
+}
+
+test("joinUrl and v1 stripping", () => {
+  assert.equal(joinUrl("https://x/v1/", "/chat/completions"), "https://x/v1/chat/completions");
+  assert.equal(stripV1("/v1/chat/completions"), "/chat/completions");
+  assert.equal(stripV1("/v1/models/"), "/models");
+  assert.equal(upstreamRestPath("/v1/chat/completions"), "chat/completions");
+  assert.equal(upstreamRestPath("/v1/admin"), null);
+  assert.equal(secretName("open-ai"), "OPEN_AI_API_KEY");
+  assert.equal(keyPrefix("sk-abcdefghijklmnop"), "sk-abcdefgh");
+});
+
+test("parse config JSON", () => {
+  assert.deepEqual(parseExtraProviders(""), []);
+  assert.deepEqual(parseExtraProviders('[{"id":" openai ","baseUrl":" https://api.openai.com/v1 "}]'), [
+    { id: "openai", baseUrl: "https://api.openai.com/v1" },
+  ]);
+  assert.deepEqual(parseJsonObject('{"gpt-4":"opencode/gpt-5.4"}'), { "gpt-4": "opencode/gpt-5.4" });
+});
+
+test("pickUpstream default + prefix + alias", () => {
+  const map = providers("opencode", "cursor");
+
+  assert.deepEqual(
+    pickUpstream({
+      requestedModel: "glm-5.2",
+      aliases: {},
+      defaultProvider: "opencode",
+      providers: map,
+    }),
+    { provider: map.get("opencode")!, model: "glm-5.2" },
+  );
+
+  assert.equal(
+    pickUpstream({
+      requestedModel: "cursor/composer-2.5",
+      aliases: {},
+      defaultProvider: "opencode",
+      providers: map,
+    }).provider.id,
+    "cursor",
+  );
+
+  assert.equal(
+    pickUpstream({
+      requestedModel: "gpt-4",
+      aliases: { "gpt-4": "cursor/composer-2.5" },
+      defaultProvider: "opencode",
+      providers: map,
+    }).model,
+    "composer-2.5",
+  );
+});
+
+test("pickUpstream falls back when default provider is not live", () => {
+  const map = providers("openai");
+  const got = pickUpstream({
+    requestedModel: "gpt-4o",
+    aliases: {},
+    defaultProvider: "opencode",
+    providers: map,
+  });
+  assert.equal(got.provider.id, "openai");
+  assert.equal(got.model, "gpt-4o");
+});
+
+test("exposeModels prefixes only when multiple upstreams", () => {
+  assert.deepEqual(
+    exposeModels([{ providerId: "openai", models: ["gpt-4o", "o3"] }]).map((m) => m.id),
+    ["gpt-4o", "o3"],
+  );
+  assert.deepEqual(
+    exposeModels([
+      { providerId: "openai", models: ["gpt-4o"] },
+      { providerId: "opencode", models: ["glm-5.2"] },
+    ]).map((m) => m.id),
+    ["openai/gpt-4o", "opencode/glm-5.2"],
+  );
+  assert.deepEqual(parseModelsResponse({ data: [{ id: " a " }, { id: "" }, {}] }), ["a"]);
+  assert.deepEqual(parseModelsResponse({ models: ["gpt-4o", { id: "o3" }] }), ["gpt-4o", "o3"]);
+});
+
+test("pickUpstream skips blacklisted upstreams", () => {
+  const map = providers("opencode", "openai");
+  const blocked = new Set(["opencode"]);
+  const got = pickUpstream({
+    requestedModel: "gpt-4o",
+    aliases: {},
+    defaultProvider: "opencode",
+    providers: map,
+    blocked,
+  });
+  assert.equal(got.provider.id, "openai");
+
+  assert.throws(
+    () =>
+      pickUpstream({
+        requestedModel: "opencode/glm-5.2",
+        aliases: {},
+        defaultProvider: "openai",
+        providers: map,
+        blocked,
+      }),
+    (err: unknown) => err instanceof GatewayError && err.status === 503,
+  );
+
+  assert.throws(
+    () =>
+      pickUpstream({
+        requestedModel: "gpt-4o",
+        aliases: {},
+        keyProvider: "opencode",
+        defaultProvider: "opencode",
+        providers: map,
+        blocked,
+      }),
+    (err: unknown) => err instanceof GatewayError && err.status === 503,
+  );
+});
+
+test("same-vendor pool: peers, rotate, failover, prefix falls to sibling", () => {
+  assert.equal(failoverAction(429), "next");
+  assert.equal(failoverAction(401), "ban-next");
+  assert.equal(failoverAction(200), "stop");
+
+  const pool = new Map<string, Provider>([
+    ["oa", { id: "oa", baseUrl: "https://api.openai.com/v1", apiKey: "a" }],
+    ["oa2", { id: "oa2", baseUrl: "https://api.openai.com/v1", apiKey: "b" }],
+    ["oc", { id: "oc", baseUrl: "https://opencode.ai/zen/v1", apiKey: "c" }],
+  ]);
+  assert.deepEqual(vendorPeers(pool, "oa").map((p) => p.id), ["oa", "oa2"]);
+  assert.deepEqual(vendorPeers(pool, "oa", new Set(["oa"])).map((p) => p.id), ["oa2"]);
+  assert.deepEqual(rotateFrom(vendorPeers(pool, "oa"), "oa2").map((p) => p.id), ["oa2", "oa"]);
+  assert.deepEqual(vendorGroups([...pool.values()]).map((g) => g.id), ["oa", "oc"]);
+
+  const got = pickUpstream({
+    requestedModel: "oa/gpt-4o",
+    aliases: {},
+    defaultProvider: "oc",
+    providers: pool,
+    blocked: new Set(["oa"]),
+  });
+  assert.equal(got.provider.id, "oa2");
+  assert.equal(got.model, "gpt-4o");
+});
+
+test("pickUpstream respects per-key provider lock", () => {
+  const map = providers("opencode", "cursor");
+  assert.throws(
+    () =>
+      pickUpstream({
+        requestedModel: "cursor/composer-2.5",
+        aliases: {},
+        keyProvider: "opencode",
+        defaultProvider: "opencode",
+        providers: map,
+      }),
+    (err: unknown) => err instanceof GatewayError && err.status === 403,
+  );
+
+  const ok = pickUpstream({
+    requestedModel: "opencode/glm-5.2",
+    aliases: {},
+    keyProvider: "opencode",
+    defaultProvider: "cursor",
+    providers: map,
+  });
+  assert.equal(ok.provider.id, "opencode");
+  assert.equal(ok.model, "glm-5.2");
+});
+
+test("session merge keeps client history and fills in single-turn", () => {
+  const stored = [
+    { role: "user", content: "你好" },
+    { role: "assistant", content: "你好，有什么事" },
+  ];
+  const full = [
+    { role: "user", content: "你好" },
+    { role: "assistant", content: "你好，有什么事" },
+    { role: "user", content: "再问一句" },
+  ];
+  assert.equal(looksLikeFullHistory(full), true);
+  assert.deepEqual(mergeSessionMessages(stored, full), full);
+
+  const onlyNew = [{ role: "user", content: "再问一句" }];
+  assert.equal(looksLikeFullHistory(onlyNew), false);
+  assert.deepEqual(mergeSessionMessages(stored, onlyNew), [...stored, ...onlyNew]);
+});
+
+test("session id prefers header then falls back to key", () => {
+  const headers = new Headers({ "x-session-id": "win-A" });
+  assert.equal(
+    resolveSessionId({ header: (n) => headers.get(n), payload: {}, keyId: "abc" }),
+    "win-A",
+  );
+  assert.equal(
+    resolveSessionId({ header: () => null, payload: { conversation_id: "c1" }, keyId: "abc" }),
+    "c1",
+  );
+  assert.equal(
+    resolveSessionId({ header: () => null, payload: {}, keyId: "abc" }),
+    "key:abc",
+  );
+});
+
+test("sse delta and assistant json parse", () => {
+  const acc = { content: "" };
+  applyChatSseLine(acc, 'data: {"choices":[{"delta":{"content":"你"}}]}');
+  applyChatSseLine(acc, 'data: {"choices":[{"delta":{"content":"好"}}]}');
+  applyChatSseLine(acc, "data: [DONE]");
+  assert.equal(acc.content, "你好");
+  const msg = assistantFromChatCompletion({
+    choices: [{ message: { role: "assistant", content: "答" } }],
+  });
+  assert.equal(msg?.content, "答");
+  const trimmed = trimSessionMessages(
+    Array.from({ length: 90 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: String(i) })),
+  );
+  assert.equal(trimmed.length, 80);
+});
+
+test("quota helpers and usage parse", () => {
+  assert.equal(defaultQuotaTokens(undefined), 1_000_000);
+  assert.equal(defaultQuotaTokens("500000"), 500000);
+  assert.equal(parseQuotaInput(undefined, 1000), 1000);
+  assert.equal(parseQuotaInput(0, 1000), 0);
+  assert.equal(parseQuotaInput("25000", 1000), 25000);
+  assert.equal(effectiveQuota({}, 9), 9);
+  assert.equal(effectiveQuota({ quotaTokens: 0 }, 9), 0);
+  assert.equal(tokensFromUsage({ usage: { prompt_tokens: 10, completion_tokens: 5 } }), 15);
+  assert.equal(tokensFromUsage({ usage: { total_tokens: 42 } }), 42);
+  assert.equal(tokensFromUsage({ usage: { input_tokens: 3, output_tokens: 4 } }), 7);
+  assert.equal(estimateTokens("abcd"), 2);
+  const views = attachUsage(
+    [{ id: "a", name: "n", prefix: "sk-a", enabled: true, createdAt: 1, quotaTokens: 100 }],
+    { a: { used: 40, requests: 2 } },
+    1_000_000,
+  );
+  assert.equal(views[0].usedTokens, 40);
+  assert.equal(views[0].remainingTokens, 60);
+  const acc = { content: "" };
+  applyChatSseLine(acc, 'data: {"choices":[{"delta":{"content":"x"}}],"usage":{"total_tokens":9}}');
+  assert.equal(acc.content, "x");
+  assert.equal(acc.tokens, 9);
+  const go = parseOpencodeGoUsage({
+    usage: { monthly: { percent: 40, resetsAt: "t" }, rolling: { percent: 10 } },
+  });
+  assert.equal(go?.ok, true);
+  assert.equal(go?.windows?.find((w) => w.name === "monthly")?.remainingPercent, 60);
+  assert.equal(parseOpencodeBalance({ balance: { usd: 4.1 } })?.balanceUsd, 4.1);
+});

@@ -1,0 +1,21 @@
+# 依赖与构建
+node_modules/
+.wrangler/
+dist/
+
+# 本地 / 生产密钥 —— 永远不要提交
+.dev.vars
+.dev.vars.local
+.env
+.env.*
+!.env.example
+!.dev.vars.example
+secrets.json
+secrets*.json
+*.pem
+
+# 杂项
+.DS_Store
+*.log
+.idea/
+.vscode/

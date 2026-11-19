@@ -195,9 +195,10 @@ export function adminHtml(origin: string): string {
   <section class="card" id="login-card">
     <label>管理员口令（ADMIN_TOKEN）</label>
     <div class="row">
-      <input id="token" type="password" autocomplete="current-password" placeholder="不会离开这台浏览器，只用来调本站 /admin/api" />
+      <input id="token" type="password" autocomplete="current-password" placeholder="登录成功后 7 天内不用再输" />
       <button type="button" id="login">进入</button>
     </div>
+    <p class="hint" style="margin:8px 0 0">口令不会明文存在浏览器。登录后发 HttpOnly Cookie，有效期 7 天。</p>
     <p class="err" id="login-err"></p>
   </section>
 
@@ -220,6 +221,7 @@ export function adminHtml(origin: string): string {
         <strong>已签发</strong>
         <button type="button" id="open-create">新建使用者 Key</button>
         <button class="ghost" type="button" id="refresh"><span class="ico" aria-hidden="true">↻</span>刷新</button>
+        <button class="ghost" type="button" id="logout">退出</button>
       </div>
       <div class="keys-wrap">
         <table class="keys">
@@ -285,8 +287,7 @@ export function adminHtml(origin: string): string {
 <script>
 const ORIGIN = ${JSON.stringify(origin)};
 const tokenEl = document.getElementById("token");
-const saved = sessionStorage.getItem("admin_token");
-if (saved) tokenEl.value = saved;
+sessionStorage.removeItem("admin_token");
 let defaultQuota = 1000000;
 let modelHint = "上游模型 ID";
 const goneIds = new Set();
@@ -318,14 +319,22 @@ function bindQuotaLive(input, label, emptyText) {
 }
 
 function headers() {
-  return { "authorization": "Bearer " + tokenEl.value.trim(), "content-type": "application/json" };
+  const h = { "content-type": "application/json" };
+  const t = tokenEl.value.trim();
+  if (t) h.authorization = "Bearer " + t;
+  return h;
 }
 
 async function api(path, opt) {
-  const res = await fetch(path, { ...opt, headers: { ...headers(), ...(opt && opt.headers) } });
+  const res = await fetch(path, { ...opt, credentials: "same-origin", headers: { ...headers(), ...(opt && opt.headers) } });
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
+  if (res.status === 401 && !document.getElementById("app").hidden) {
+    show(document.getElementById("app"), false);
+    show(document.getElementById("login-card"), true);
+    throw new Error("登录已过期，请重新输入口令");
+  }
   if (!res.ok) throw new Error((data && data.error && data.error.message) || data.error || res.statusText);
   return data;
 }
@@ -359,19 +368,36 @@ function flashLabel(btn, label) {
   }, 1400);
 }
 
+async function enter(status) {
+  tokenEl.value = "";
+  document.getElementById("login-err").textContent = "";
+  show(document.getElementById("login-card"), false);
+  show(document.getElementById("app"), true);
+  renderStatus(status);
+  await reload();
+}
+
 document.getElementById("login").onclick = async () => {
   const err = document.getElementById("login-err");
   err.textContent = "";
   try {
-    const status = await api("/admin/api/status");
-    sessionStorage.setItem("admin_token", tokenEl.value.trim());
-    show(document.getElementById("login-card"), false);
-    show(document.getElementById("app"), true);
-    renderStatus(status);
-    await reload();
+    await enter(await api("/admin/api/status"));
   } catch (e) {
     err.textContent = e.message || String(e);
   }
+};
+
+api("/admin/api/status").then(enter).catch(() => {});
+
+document.getElementById("logout").onclick = async () => {
+  const btn = document.getElementById("logout");
+  await withBusy(btn, async () => {
+    try { await api("/admin/api/logout", { method: "POST" }); } catch { /* ignore */ }
+  });
+  tokenEl.value = "";
+  show(document.getElementById("app"), false);
+  show(document.getElementById("login-card"), true);
+  tokenEl.focus();
 };
 
 function publicModelId(providerId, raw, multi) {

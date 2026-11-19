@@ -1,6 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { adminHtml } from "./admin-ui";
 import {
+  ADMIN_SESSION_COOKIE,
+  adminSessionClearCookie,
+  adminSessionSetCookie,
   applyChatSseLine,
   assistantFromChatCompletion,
   attachUsage,
@@ -11,6 +14,7 @@ import {
   extractToken,
   GatewayError,
   joinUrl,
+  mintAdminSession,
   loadProviders,
   looksLikeFullHistory,
   mergeSessionMessages,
@@ -23,9 +27,11 @@ import {
   parseOpencodeGoUsage,
   parseQuotaInput,
   pickUpstream,
+  readCookie,
   resolveSessionId,
   rotateFrom,
   timingSafeEqualString,
+  verifyAdminSession,
   tokensFromUsage,
   trimSessionMessages,
   upstreamRestPath,
@@ -148,7 +154,21 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     return new Response(adminHtml(url.origin), { headers: { "content-type": "text/html; charset=utf-8" } });
   }
   if (path.startsWith("/admin/api")) {
-    return adminApi(request, env, path);
+    if (request.method === "POST" && path === "/admin/api/logout") {
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: {
+          ...corsHeaders(),
+          "content-type": "application/json",
+          "set-cookie": adminSessionClearCookie(request.url),
+        },
+      });
+    }
+    const viaBearer = await requireAdmin(request, env);
+    const res = await adminApi(request, env, path);
+    if (!viaBearer) return res;
+    const headers = new Headers(res.headers);
+    headers.append("set-cookie", adminSessionSetCookie(await mintAdminSession(env.ADMIN_TOKEN.trim()), request.url));
+    return new Response(res.body, { status: res.status, headers });
   }
 
   const rest = upstreamRestPath(path);
@@ -168,17 +188,21 @@ function landing(origin: string): string {
 </body>`;
 }
 
-async function requireAdmin(request: Request, env: Env): Promise<void> {
+/** @returns true if auth was the raw ADMIN_TOKEN (mint a session cookie). */
+async function requireAdmin(request: Request, env: Env): Promise<boolean> {
   const token = env.ADMIN_TOKEN?.trim();
   if (!token) throw new GatewayError(503, "admin_unconfigured", "ADMIN_TOKEN is not set");
   const got = extractToken(request);
-  if (!got || !(await timingSafeEqualString(got, token))) {
+  if (got) {
+    if (await timingSafeEqualString(got, token)) return true;
     throw new GatewayError(401, "unauthorized", "Invalid admin token");
   }
+  const cookie = readCookie(request.headers.get("cookie"), ADMIN_SESSION_COOKIE);
+  if (cookie && (await verifyAdminSession(token, cookie))) return false;
+  throw new GatewayError(401, "unauthorized", "Invalid admin token");
 }
 
 async function adminApi(request: Request, env: Env, path: string): Promise<Response> {
-  await requireAdmin(request, env);
   const { live, publicList } = loadProviders(env);
   const fallbackQuota = defaultQuotaTokens(env.DEFAULT_QUOTA_TOKENS);
   const board = quotaBoard(env);

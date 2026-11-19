@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  ADMIN_SESSION_COOKIE,
   GatewayError,
+  adminSessionClearCookie,
+  adminSessionSetCookie,
   applyChatSseLine,
   assistantFromChatCompletion,
   attachUsage,
@@ -21,7 +24,10 @@ import {
   parseOpencodeGoUsage,
   parseQuotaInput,
   pickUpstream,
+  mintAdminSession,
+  readCookie,
   resolveSessionId,
+  verifyAdminSession,
   rotateFrom,
   secretName,
   stripV1,
@@ -297,4 +303,25 @@ test("quota helpers and usage parse", () => {
   assert.equal(go?.ok, true);
   assert.equal(go?.windows?.find((w) => w.name === "monthly")?.remainingPercent, 60);
   assert.equal(parseOpencodeBalance({ balance: { usd: 4.1 } })?.balanceUsd, 4.1);
+});
+
+test("admin session cookie is signed, expiring, not the raw token", async () => {
+  const secret = "admin-token-secret";
+  const now = 1_700_000_000_000;
+  const value = await mintAdminSession(secret, now);
+  assert.equal(value.includes(secret), false);
+  assert.equal(await verifyAdminSession(secret, value, now), true);
+  assert.equal(await verifyAdminSession("other", value, now), false);
+  assert.equal(await verifyAdminSession(secret, value.replace(/\.[0-9a-f]+$/, "." + "0".repeat(64)), now), false);
+  assert.equal(await verifyAdminSession(secret, value, now + 7 * 24 * 60 * 60 * 1000 + 1000), false);
+
+  const https = adminSessionSetCookie(value, "https://aofahub.dev/admin");
+  assert.match(https, new RegExp(`^${ADMIN_SESSION_COOKIE}=`));
+  assert.match(https, /HttpOnly/);
+  assert.match(https, /SameSite=Strict/);
+  assert.match(https, /Path=\/admin/);
+  assert.match(https, /Secure/);
+  assert.equal(adminSessionSetCookie(value, "http://127.0.0.1:8787/admin").includes("Secure"), false);
+  assert.match(adminSessionClearCookie("https://aofahub.dev/admin"), /Max-Age=0/);
+  assert.equal(readCookie(`a=1; ${ADMIN_SESSION_COOKIE}=${value}; b=2`, ADMIN_SESSION_COOKIE), value);
 });

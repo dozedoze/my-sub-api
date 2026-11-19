@@ -190,6 +190,68 @@ export function extractToken(request: Request): string | null {
   return alt?.trim() || null;
 }
 
+export const ADMIN_SESSION_COOKIE = "admin_session";
+export const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function hmacHex(secret: string, msg: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(msg)));
+  return [...sig].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export async function mintAdminSession(secret: string, now = Date.now()): Promise<string> {
+  const exp = Math.floor((now + ADMIN_SESSION_TTL_MS) / 1000);
+  const sig = await hmacHex(secret, `admin-session:v1:${exp}`);
+  return `${exp}.${sig}`;
+}
+
+export async function verifyAdminSession(secret: string, value: string, now = Date.now()): Promise<boolean> {
+  const dot = value.indexOf(".");
+  if (dot <= 0) return false;
+  const expStr = value.slice(0, dot);
+  const sig = value.slice(dot + 1);
+  if (!/^[0-9]{1,12}$/.test(expStr) || !/^[0-9a-f]{64}$/.test(sig)) return false;
+  const exp = Number(expStr);
+  const nowSec = Math.floor(now / 1000);
+  if (exp <= nowSec) return false;
+  if (exp > nowSec + ADMIN_SESSION_TTL_MS / 1000 + 60) return false;
+  const expect = await hmacHex(secret, `admin-session:v1:${exp}`);
+  return timingSafeEqualString(sig, expect);
+}
+
+export function readCookie(header: string | null, name: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const i = part.indexOf("=");
+    if (i < 0) continue;
+    if (part.slice(0, i).trim() !== name) continue;
+    return part.slice(i + 1).trim() || null;
+  }
+  return null;
+}
+
+export function adminSessionSetCookie(value: string, requestUrl: string, maxAgeSec = ADMIN_SESSION_TTL_MS / 1000): string {
+  const secure = new URL(requestUrl).protocol === "https:";
+  return [
+    `${ADMIN_SESSION_COOKIE}=${value}`,
+    "Path=/admin",
+    "HttpOnly",
+    "SameSite=Strict",
+    `Max-Age=${Math.floor(maxAgeSec)}`,
+    ...(secure ? ["Secure"] : []),
+  ].join("; ");
+}
+
+export function adminSessionClearCookie(requestUrl: string): string {
+  return adminSessionSetCookie("deleted", requestUrl, 0);
+}
+
 export async function sha256hex(text: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");

@@ -15,8 +15,10 @@ import {
   keyPrefix,
   looksLikeFullHistory,
   mergeSessionMessages,
+  claudeDiscoveryModels,
   exposeModels,
   exposeAutoModel,
+  matchListedModel,
   failoverAction,
   modelFallback,
   parseProviders,
@@ -67,6 +69,7 @@ import {
   parseAutoRoute,
   resolveAutoRoute,
   DEFAULT_AUTO_ROUTE,
+  isAutoModel,
   parseAutoRouterReply,
   stickAutoTier,
 } from "./auto.ts";
@@ -81,7 +84,11 @@ test("joinUrl and v1 stripping", () => {
   assert.equal(joinUrl("https://x/v1/", "/chat/completions"), "https://x/v1/chat/completions");
   assert.equal(stripV1("/v1/chat/completions"), "/chat/completions");
   assert.equal(stripV1("/v1/models/"), "/models");
+  assert.equal(stripV1("/v1/v1/messages"), "/messages");
   assert.equal(upstreamRestPath("/v1/chat/completions"), "chat/completions");
+  assert.equal(upstreamRestPath("/v1/v1/messages"), "messages");
+  assert.equal(upstreamRestPath("/v1/models/opencode/qwen4-max"), "models/opencode/qwen4-max");
+  assert.equal(upstreamRestPath("/v1/messages/count_tokens"), "messages/count_tokens");
   assert.equal(upstreamRestPath("/v1/admin"), null);
   assert.equal(secretName("open-ai"), "OPEN_AI_API_KEY");
   assert.equal(keyPrefix("sk-abcdefghijklmnop"), "sk-abcdefgh");
@@ -274,6 +281,47 @@ test("pickUpstream default + prefix + alias", () => {
     }).model,
     "composer-2.5",
   );
+});
+
+test("pickUpstream routes Claude Code ids to the unique OpenCode model", () => {
+  const map = new Map<string, Provider>([
+    ["grok", { id: "grok", baseUrl: "https://api.x.ai/v1", apiKey: "k" }],
+    ["deepseek", { id: "deepseek", baseUrl: "https://api.deepseek.com/v1", apiKey: "k" }],
+    ["opencode", { id: "opencode", baseUrl: "https://opencode.ai/zen/go/v1", apiKey: "k" }],
+  ]);
+  const qwen = pickUpstream({
+    requestedModel: "qwen4-max",
+    aliases: {},
+    defaultProvider: "grok",
+    providers: map,
+  });
+  assert.equal(qwen.provider.id, "opencode");
+  assert.equal(qwen.model, "qwen4-max");
+  const prefixed = pickUpstream({
+    requestedModel: "claude/opencode/qwen4-max",
+    aliases: {},
+    defaultProvider: "grok",
+    providers: map,
+  });
+  assert.equal(prefixed.provider.id, "opencode");
+  assert.equal(prefixed.model, "qwen4-max");
+  const grok = pickUpstream({
+    requestedModel: "grok-4.6",
+    aliases: {},
+    defaultProvider: "grok",
+    providers: map,
+  });
+  assert.equal(grok.provider.id, "grok");
+  assert.equal(isAutoModel("claude/auto"), true);
+  assert.equal(isAutoModel("auto"), true);
+  const listed = exposeModels([
+    { providerId: "grok", models: ["grok-4.6"] },
+    { providerId: "opencode", models: ["qwen4-max"] },
+  ]);
+  assert.equal(matchListedModel(listed, "opencode/qwen4-max")?.id, "opencode/qwen4-max");
+  assert.equal(matchListedModel(listed, "qwen4-max")?.id, "opencode/qwen4-max");
+  assert.equal(matchListedModel(listed, "claude/opencode/qwen4-max")?.id, "opencode/qwen4-max");
+  assert.equal(claudeDiscoveryModels(listed)[1].id, "claude/opencode/qwen4-max");
 });
 
 test("pickUpstream falls back when default provider is not live", () => {

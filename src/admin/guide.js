@@ -72,6 +72,37 @@ function renderHow(panel, tab, compact) {
   const key = lastPlain || "sk-签发的Key";
   const model = modelHint || "auto";
 
+  if (tab === "claude") {
+    addHowText(panel, "p", compact
+      ? "Claude Code 走 Anthropic Messages。Base URL 不要带 /v1；打开网关模型发现后，/model 才能看到千问。"
+      : "Claude Code 只打 /v1/messages。ANTHROPIC_BASE_URL 填站点根地址，不要带 /v1，它会自己拼路径。凭证用 ANTHROPIC_AUTH_TOKEN。打开 CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1，否则 /model 会丢掉不含 claude 的 id，看起来像模型不存在。", "hint");
+    addSteps(panel, compact ? [
+      "ANTHROPIC_BASE_URL 填 " + origin + "（不要 /v1）",
+      "ANTHROPIC_AUTH_TOKEN 填签发的 Key，不要只用 ANTHROPIC_API_KEY",
+      "设置 CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+      "重启后 /model 选展示名为 " + model + " 的项",
+    ] : [
+      { title: "填根地址", body: "ANTHROPIC_BASE_URL=" + origin + "。不要写成 " + base + "，否则请求会变成 /v1/v1/messages，Claude Code 会报模型不存在。" },
+      { title: "填 Token", body: "ANTHROPIC_AUTH_TOKEN 填签发的分发账号 Key。用 AUTH_TOKEN 时后台小请求会跟主模型走；只设 ANTHROPIC_API_KEY 时它会去打内置 Haiku 名字，上游没有就会再报不存在。" },
+      { title: "打开模型发现", body: "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1。发现接口只保留 id 里带 claude 的项，服务端会把 " + model + " 暴露成 claude/" + model + "，选择器里显示原名。" },
+      { title: "选用模型", body: "重启 Claude Code，运行 /model，选 " + model + "。也可以把 ANTHROPIC_DEFAULT_SONNET_MODEL 设成 " + model + "，ANTHROPIC_DEFAULT_HAIKU_MODEL 设成便宜的 opencode/qwen3.8-flash。" },
+    ]);
+    addCopyPre(panel, JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: origin,
+        ANTHROPIC_AUTH_TOKEN: key,
+        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "opencode/qwen3.8-flash",
+      },
+    }, null, 2));
+    if (!compact) {
+      addNote(panel, "配置写在 ~/.claude/settings.json 的 env 里。改完要完全退出再开。", "warn");
+      addDocs(panel, "https://code.claude.com/docs/en/llm-gateway-connect", "code.claude.com/docs · Connect Claude Code to an LLM gateway");
+    }
+    return;
+  }
+
   if (tab === "opencode") {
     addHowText(panel, "p", compact
       ? "在 opencode.jsonc 中添加一个 OpenAI 兼容 provider，package 使用 openai-compatible。"

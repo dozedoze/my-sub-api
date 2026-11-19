@@ -120,6 +120,7 @@ const PROXY_PATHS = new Set([
   "completions",
   "responses",
   "messages",
+  "messages/count_tokens",
   "models",
   "embeddings",
   "images/generations",
@@ -133,13 +134,14 @@ export function joinUrl(base: string, path: string): string {
 }
 
 export function stripV1(pathname: string): string {
-  return pathname.replace(/\/+$/, "").replace(/^\/v1(?=\/|$)/, "") || "/";
+  return pathname.replace(/\/+$/, "").replace(/^(\/v1)+(?=\/|$)/, "") || "/";
 }
 
 export function upstreamRestPath(pathname: string): string | null {
   const rest = stripV1(pathname).replace(/^\//, "");
-  if (!PROXY_PATHS.has(rest)) return null;
-  return rest;
+  if (PROXY_PATHS.has(rest)) return rest;
+  if (rest.startsWith("models/") && rest.length > "models/".length) return rest;
+  return null;
 }
 
 /** wrangler vars 可以是 JSON 绑定，也可以是旧的 JSON 字符串。 */
@@ -1049,6 +1051,54 @@ export function exposeAutoModel(
   return [{ id: "auto", object: "model", created: 0, owned_by: "auto" }, ...models];
 }
 
+export type ListedModel = {
+  id: string;
+  object: "model";
+  created: number;
+  owned_by: string;
+  display_name?: string;
+  description?: string;
+};
+
+/** Claude Code 发现模型时丢掉不含 claude/anthropic 的 id。加一层前缀让 /model 能看到千问。 */
+export function claudeDiscoveryModels(models: ListedModel[]): ListedModel[] {
+  return models.map((m) => {
+    if (/claude|anthropic/i.test(m.id)) return m;
+    return {
+      ...m,
+      id: `claude/${m.id}`,
+      display_name: m.display_name ?? m.id,
+      description: m.description ?? (m.id === "auto" ? "按对话难易自动选模型" : "From gateway"),
+    };
+  });
+}
+
+export function matchListedModel(models: ListedModel[], want: string): ListedModel | null {
+  const raw = want.trim();
+  if (!raw) return null;
+  const bare = raw.replace(/^claude\//i, "");
+  return (
+    models.find((m) => m.id === raw) ||
+    models.find((m) => m.id === bare) ||
+    models.find((m) => m.id === `claude/${bare}`) ||
+    models.find((m) => m.id.slice(m.id.lastIndexOf("/") + 1) === bare) ||
+    null
+  );
+}
+
+export function anthropicModelCard(model: ListedModel, requestedId = model.id): Record<string, unknown> {
+  const display = model.display_name ?? model.id.replace(/^claude\//i, "");
+  return {
+    id: requestedId,
+    type: "model",
+    object: "model",
+    display_name: display,
+    created: model.created,
+    created_at: new Date(model.created * 1000).toISOString(),
+    owned_by: model.owned_by,
+  };
+}
+
 export function vendorPeers(
   providers: Map<string, Provider>,
   leadId: string,
@@ -1158,6 +1208,28 @@ export function failoverAction(status: number): "next" | "ban-next" | "stop" {
   return "stop";
 }
 
+function uniqueRestrictedProvider(
+  model: string,
+  providers: Map<string, Provider>,
+  blocked: Set<string>,
+): string | null {
+  if (!model) return null;
+  const hits: string[] = [];
+  for (const p of providers.values()) {
+    if (blocked.has(p.id)) continue;
+    const host = providerHost(p.baseUrl);
+    const restricted =
+      host === "opencode.ai" ||
+      host.endsWith(".opencode.ai") ||
+      p.id === "grok" ||
+      host === "x.ai" ||
+      host.endsWith(".x.ai");
+    if (!restricted) continue;
+    if (modelAllowed(p, model)) hits.push(p.id);
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
 export function pickUpstream(opts: {
   requestedModel: string | undefined;
   aliases: Record<string, string>;
@@ -1175,6 +1247,10 @@ export function pickUpstream(opts: {
 
   let model = (opts.requestedModel ?? "").trim();
   if (model && opts.aliases[model]) model = opts.aliases[model];
+  if (/^claude\//i.test(model) && !opts.providers.has("claude")) {
+    model = model.replace(/^claude\//i, "");
+    if (model && opts.aliases[model]) model = opts.aliases[model];
+  }
 
   if (opts.keyProvider && blocked.has(opts.keyProvider)) {
     throw new GatewayError(503, "provider_blacklisted", `Upstream '${opts.keyProvider}' is blacklisted`);
@@ -1187,10 +1263,12 @@ export function pickUpstream(opts: {
 
   let providerId = opts.keyProvider || (usable(opts.defaultProvider) ? opts.defaultProvider : firstLive);
   const slash = model.indexOf("/");
+  let namedProvider = false;
   if (slash > 0) {
     const maybe = model.slice(0, slash);
     const named = opts.providers.get(maybe);
     if (named || blocked.has(maybe)) {
+      namedProvider = true;
       if (opts.keyProvider && opts.keyProvider !== maybe) {
         throw new GatewayError(403, "provider_locked", `This key is locked to provider '${opts.keyProvider}'`);
       }
@@ -1205,6 +1283,10 @@ export function pickUpstream(opts: {
       }
       model = model.slice(slash + 1);
     }
+  }
+  if (!namedProvider && !opts.keyProvider) {
+    const unique = uniqueRestrictedProvider(model, opts.providers, blocked);
+    if (unique) providerId = unique;
   }
 
   if (blocked.has(providerId)) {

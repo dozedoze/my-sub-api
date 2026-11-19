@@ -106,9 +106,10 @@
         </section>
         <section class="card">
           <strong>按客户端填写</strong>
-          <p class="hint">协议一律选 OpenAI Chat Completions。模型填 <code>auto</code> 会按对话难易自动选；也可以填「上游账号」页里的模型 id。多个上游时写成 <code>上游id/模型id</code>。</p>
+          <p class="hint">多数客户端走 OpenAI Chat Completions；Claude Code 走 Anthropic Messages。模型填 <code>auto</code> 会按对话难易自动选；也可以填「上游账号」页里的模型 id。多个上游时写成 <code>上游id/模型id</code>。</p>
           <div class="tabs" id="guide-tabs">
             <button type="button" class="tab on" data-tab="workbuddy">WorkBuddy</button>
+            <button type="button" class="tab" data-tab="claude">Claude Code</button>
             <button type="button" class="tab" data-tab="opencode">OpenCode</button>
             <button type="button" class="tab" data-tab="cursor">Cursor</button>
             <button type="button" class="tab" data-tab="generic">Cherry Studio / 通用</button>
@@ -171,6 +172,7 @@
       <p class="hint" style="margin:0 0 8px">客户端填写方式</p>
       <div class="tabs" id="how-tabs">
         <button type="button" class="tab on" data-tab="workbuddy">WorkBuddy</button>
+        <button type="button" class="tab" data-tab="claude">Claude Code</button>
         <button type="button" class="tab" data-tab="opencode">OpenCode</button>
         <button type="button" class="tab" data-tab="cursor">Cursor</button>
         <button type="button" class="tab" data-tab="generic">Cherry Studio / 通用</button>

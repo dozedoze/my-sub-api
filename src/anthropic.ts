@@ -91,8 +91,20 @@ export function relaxToolChoice(body: Record<string, unknown>): Record<string, u
 export function prepareAnthropic(baseUrl: string, body: Record<string, unknown>): Record<string, unknown> {
   const host = hostOf(baseUrl);
   const deepseek = host === "deepseek.com" || host.endsWith(".deepseek.com");
-  if (!opencodeHost(host) && !deepseek) return body;
-  const next = relaxToolChoice(body);
+  const opencode = opencodeHost(host);
+  if (!opencode && !deepseek) return body;
+  const { output_config: _oc, context_management: _cm, ...rest } = relaxToolChoice(body);
+  let next: Record<string, unknown> = rest;
+  const thinking = asRecord(next.thinking);
+  if (opencode && thinking?.type === "adaptive") {
+    next = {
+      ...next,
+      thinking: {
+        type: "enabled",
+        ...(typeof thinking.budget_tokens === "number" ? { budget_tokens: thinking.budget_tokens } : {}),
+      },
+    };
+  }
   const choice = asRecord(next.tool_choice);
   if (deepseek && choice?.type === "tool") return { ...next, thinking: { type: "disabled" } };
   return next;

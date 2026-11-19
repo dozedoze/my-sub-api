@@ -49,6 +49,18 @@ test("messagesWire follows the upstream protocol", () => {
     prepareAnthropic("https://api.deepseek.com/v1", { tool_choice: { type: "tool", name: "bash" } }).thinking,
     { type: "disabled" },
   );
+  assert.deepEqual(
+    prepareAnthropic("https://opencode.ai/zen/go/v1", {
+      thinking: { type: "adaptive", budget_tokens: 8 },
+      output_config: { effort: "high" },
+    }).thinking,
+    { type: "enabled", budget_tokens: 8 },
+  );
+  assert.equal(
+    "output_config" in
+      prepareAnthropic("https://opencode.ai/zen/go/v1", { thinking: { type: "enabled" }, output_config: { effort: "high" } }),
+    false,
+  );
 });
 
 test("messagesToChat rewrites tools and tool results", () => {

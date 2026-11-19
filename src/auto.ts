@@ -94,7 +94,9 @@ export function orderAutoTargets(chain: string[], pinned: string | null): string
 }
 
 export function isAutoModel(model: string | undefined): boolean {
-  return (model ?? "").trim().toLowerCase() === "auto";
+  let id = (model ?? "").trim().toLowerCase();
+  if (id.startsWith("claude/")) id = id.slice("claude/".length);
+  return id === "auto";
 }
 
 const AUTO_ACK =

@@ -19,12 +19,15 @@ import {
   applyChatSseLine,
   applyUpstreamSticky,
   assistantFromChatCompletion,
+  anthropicModelCard,
+  claudeDiscoveryModels,
   corsHeaders,
   defaultQuotaTokens,
   effectiveQuota,
   estimateTokens,
   exposeAutoModel,
   exposeModels,
+  matchListedModel,
   extractToken,
   failoverAction,
   GatewayError,
@@ -81,14 +84,14 @@ export async function proxy(request: Request, env: Env, ctx: ExecutionContext, r
   const autoRoute = picked.route;
   const defaultProvider = live[0]?.id ?? "";
 
-  if (rest === "models" && request.method === "GET") {
+  if ((rest === "models" || rest.startsWith("models/")) && request.method === "GET") {
     if (issued.provider && blocked.has(issued.provider)) {
       throw new GatewayError(503, "provider_blacklisted", `Upstream '${issued.provider}' is blacklisted`);
     }
     const targets = (issued.provider ? [map.get(issued.provider)] : live).filter(
       (p): p is Provider => p != null && !blocked.has(p.id),
     );
-    return listModels(targets, Boolean(autoRoute));
+    return listModels(targets, Boolean(autoRoute), request, rest);
   }
 
   let model: string | undefined;
@@ -103,6 +106,9 @@ export async function proxy(request: Request, env: Env, ctx: ExecutionContext, r
       throw new GatewayError(400, "invalid_request", "Invalid JSON body");
     }
     if ("model" in payload && typeof payload.model === "string") model = payload.model;
+  }
+  if (rest === "messages/count_tokens") {
+    return Response.json({ input_tokens: estimateTokens(payload) }, { headers: corsHeaders() });
   }
 
   const conversational =
@@ -362,15 +368,24 @@ async function fetchGroupModels(members: Provider[]): Promise<string[]> {
   return [];
 }
 
-async function listModels(providers: Provider[], includeAuto: boolean): Promise<Response> {
+async function listModels(
+  providers: Provider[],
+  includeAuto: boolean,
+  request: Request,
+  rest: string,
+): Promise<Response> {
   const groups = await Promise.all(
     vendorGroups(providers).map(async (g) => ({ providerId: g.id, models: await fetchGroupModels(g.members) })),
   );
-  const data = exposeModels(groups);
-  return Response.json(
-    { object: "list", data: includeAuto ? exposeAutoModel(data) : data },
-    { headers: corsHeaders() },
-  );
+  const listed = includeAuto ? exposeAutoModel(exposeModels(groups)) : exposeModels(groups);
+  if (rest.startsWith("models/")) {
+    const want = decodeURIComponent(rest.slice("models/".length));
+    const found = matchListedModel(listed, want);
+    if (!found) throw new GatewayError(404, "not_found", `Model '${want}' not found`);
+    return Response.json(anthropicModelCard(found, want), { headers: corsHeaders() });
+  }
+  const data = request.headers.has("anthropic-version") ? claudeDiscoveryModels(listed) : listed;
+  return Response.json({ object: "list", data }, { headers: corsHeaders() });
 }
 
 type Handed = {

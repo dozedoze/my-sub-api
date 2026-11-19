@@ -20,8 +20,21 @@
     // 上游列表。对应 secret 为 {ID}_API_KEY
     // 同一 baseUrl 的多个 id 视为同厂商账号池，会轮询；429 换号，401/403 拉黑后换号
     "PROVIDERS": [
-      {"id":"grok","baseUrl":"https://api.x.ai/v1"},
-      {"id":"deepseek","baseUrl":"https://api.deepseek.com/v1"}
+      {
+        "id": "grok",
+        "baseUrl": "https://api.x.ai/v1",
+        // 推理 Key 查不了余额。secret 和 ${} 是环境变量名，值用 wrangler secret put。
+        "quota": {
+          "url": "https://management-api.x.ai/v1/billing/teams/${GROK_TEAM_ID}/prepaid/balance",
+          "secret": "GROK_MANAGEMENT_KEY",
+          "cents": true
+        }
+      },
+      {
+        "id": "deepseek",
+        "baseUrl": "https://api.deepseek.com/v1",
+        "quota": { "url": "https://api.deepseek.com/user/balance" }
+      }
     ],
     // 模型别名，例如 {"gpt-4":"opencode/gpt-5.4","composer":"cursor/composer-2.5"}
     "MODEL_ALIASES": {},

@@ -478,6 +478,9 @@ function renderProviderUsage(providers) {
       up.className = "hint";
       up.textContent = p.blacklist.reason || "已拉黑";
       up.title = up.textContent;
+    } else if (u && u.ok && u.label) {
+      up.textContent = u.label;
+      up.title = u.note || u.label;
     } else if (u && u.ok && typeof u.balanceUsd === "number") {
       up.textContent = "$" + u.balanceUsd.toFixed(2);
     } else if (u && u.ok && u.windows && u.windows.length) {

@@ -9,10 +9,24 @@ export class GatewayError extends Error {
   }
 }
 
+/** 上游余额查询。secret 和 ${NAME} 都是环境变量名，值放 wrangler secret 或 .dev.vars。 */
+export type QuotaQuery = {
+  url: string;
+  secret?: string;
+  method?: "POST";
+  body?: unknown;
+  /** total.val 按美分换算。xAI prepaid balance 需要。 */
+  cents?: boolean;
+};
+
 export type Provider = {
   id: string;
   baseUrl: string;
   apiKey: string;
+  quota?: QuotaQuery;
+  /** 空字符串表示 quota.secret 在环境里没有值。 */
+  quotaKey?: string;
+  quotaError?: string;
 };
 
 export type ProviderPublic = {
@@ -24,6 +38,7 @@ export type ProviderPublic = {
 export type ProviderConfig = {
   id: string;
   baseUrl: string;
+  quota?: QuotaQuery;
 };
 
 export type KeyRecord = {
@@ -126,9 +141,26 @@ export function parseProviders(raw: unknown): ProviderConfig[] {
     const id = rec.id.trim();
     const baseUrl = rec.baseUrl.trim();
     if (!id || !baseUrl) continue;
-    out.push({ id, baseUrl });
+    const quota = parseQuota(rec.quota);
+    out.push(quota ? { id, baseUrl, quota } : { id, baseUrl });
   }
   return out;
+}
+
+function parseQuota(raw: unknown): QuotaQuery | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const rec = raw as Record<string, unknown>;
+  if (typeof rec.url !== "string" || !rec.url.trim()) return undefined;
+  const quota: QuotaQuery = { url: rec.url.trim() };
+  if (typeof rec.secret === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(rec.secret.trim())) {
+    quota.secret = rec.secret.trim();
+  }
+  if (typeof rec.method === "string" && rec.method.trim().toUpperCase() === "POST") {
+    quota.method = "POST";
+    if (rec.body !== undefined) quota.body = rec.body;
+  }
+  if (rec.cents === true) quota.cents = true;
+  return quota;
 }
 
 export function secretName(providerId: string): string {
@@ -140,9 +172,9 @@ export function providerSecret(env: object, id: string): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-export function providerConfigs(env: { PROVIDERS?: unknown }): { id: string; baseUrl: string }[] {
+export function providerConfigs(env: { PROVIDERS?: unknown }): ProviderConfig[] {
   return parseProviders(env.PROVIDERS).map((p) => ({
-    id: p.id,
+    ...p,
     baseUrl: p.baseUrl.replace(/\/+$/, ""),
   }));
 }
@@ -156,9 +188,57 @@ export function loadProviders(env: object & { PROVIDERS?: unknown }): {
   for (const cfg of providerConfigs(env)) {
     const apiKey = providerSecret(env, cfg.id);
     publicList.push({ id: cfg.id, baseUrl: cfg.baseUrl, configured: Boolean(apiKey) });
-    if (apiKey) live.push({ ...cfg, apiKey });
+    if (apiKey) live.push({ ...cfg, apiKey, ...bindQuota(env, cfg.quota, apiKey) });
   }
   return { live, publicList };
+}
+
+function bindQuota(
+  env: object,
+  quota: QuotaQuery | undefined,
+  apiKey: string,
+): Pick<Provider, "quota" | "quotaKey" | "quotaError"> {
+  if (!quota) return {};
+  const quotaKey = quota.secret ? readEnvString(env, quota.secret) ?? "" : apiKey;
+  const filled = expandQuotaUrl(quota.url, env);
+  if ("error" in filled) return { quota, quotaKey, quotaError: filled.error };
+  return { quota: { ...quota, url: filled.url }, quotaKey };
+}
+
+function readEnvString(env: object, name: string): string | undefined {
+  const value = Reflect.get(env, name);
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** url 里的 ${NAME} 从 env 取值。只接受路径安全的字符，避免把密钥拼进 URL。 */
+function expandQuotaUrl(url: string, env: object): { url: string } | { error: string } {
+  const missing: string[] = [];
+  const invalid: string[] = [];
+  const filled = url.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
+    const value = readEnvString(env, name);
+    if (!value) {
+      missing.push(name);
+      return "";
+    }
+    if (!/^[A-Za-z0-9._~-]+$/.test(value)) {
+      invalid.push(name);
+      return "";
+    }
+    return value;
+  });
+  if (missing.length) return { error: `额度地址缺少 ${missing.join(", ")}` };
+  if (invalid.length) return { error: `额度地址参数无效：${invalid.join(", ")}` };
+  return { url: filled };
+}
+
+export function resolveQuotaUrl(baseUrl: string, raw: string): string | null {
+  try {
+    const url = raw.startsWith("/") ? new URL(raw, new URL(baseUrl).origin) : new URL(raw);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 export function extractToken(request: Request): string | null {
@@ -332,6 +412,8 @@ export type UpstreamProbe = {
   ok: boolean;
   source?: string;
   note: string;
+  /** 后台直接展示的余额文案。 */
+  label?: string;
   windows?: UpstreamWindow[];
   balanceUsd?: number;
 };
@@ -369,6 +451,7 @@ export function parseOpencodeGoUsage(json: unknown): UpstreamProbe | null {
     source: "opencode_go",
     note: "OpenCode Go 套餐用量（不是 Zen 预付钱包）。",
     windows,
+    label: windowsLabel(windows),
   };
 }
 
@@ -383,7 +466,135 @@ export function parseOpencodeBalance(json: unknown): UpstreamProbe | null {
     source: "opencode_balance",
     note: "上游返回的钱包余额。",
     balanceUsd: usd,
+    label: usdLabel(usd),
   };
+}
+
+function usdLabel(usd: number): string {
+  return `$${usd.toFixed(2)}`;
+}
+
+function windowsLabel(windows: UpstreamWindow[]): string {
+  return windows.map((w) => `${w.name}剩 ${Math.round(w.remainingPercent)}%`).join(" · ");
+}
+
+function asNumberish(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value.trim())) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function currencyLabel(currency: string, n: number): string {
+  const text = n.toFixed(2);
+  if (currency === "USD") return `$${text}`;
+  if (currency === "CNY") return `¥${text}`;
+  return currency ? `${currency} ${text}` : text;
+}
+
+/** 各家余额响应形状不一样，按能认出的字段收成一行文案。 */
+export function parseQuotaPayload(json: unknown, opts?: { cents?: boolean }): UpstreamProbe | null {
+  const bal = parseOpencodeBalance(json);
+  const go = parseOpencodeGoUsage(json);
+  if (bal?.ok && go?.ok) {
+    return {
+      ...bal,
+      windows: go.windows,
+      label: [bal.label, go.label].filter(Boolean).join(" · "),
+      note: "上游钱包余额 + Go 套餐用量。",
+    };
+  }
+  if (bal?.ok) return bal;
+  if (go?.ok) return go;
+  return parseAccountBalance(json) ?? parsePrepaidCents(json, opts?.cents === true) ?? parseGenericBalance(json);
+}
+
+function parseAccountBalance(json: unknown): UpstreamProbe | null {
+  if (!json || typeof json !== "object") return null;
+  const infos = (json as { balance_infos?: unknown }).balance_infos;
+  if (!Array.isArray(infos)) return null;
+  const parts: string[] = [];
+  for (const item of infos) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const n = asNumberish(row.total_balance);
+    if (n == null) continue;
+    const currency = typeof row.currency === "string" ? row.currency.trim().toUpperCase() : "";
+    parts.push(currencyLabel(currency, n));
+  }
+  if (!parts.length) return null;
+  const dead = (json as { is_available?: unknown }).is_available === false;
+  return {
+    ok: true,
+    source: "account_balance",
+    label: parts.join(" · ") + (dead ? "（不可用）" : ""),
+    note: "上游账户余额。",
+  };
+}
+
+function parsePrepaidCents(json: unknown, cents: boolean): UpstreamProbe | null {
+  if (!json || typeof json !== "object") return null;
+  const rec = json as Record<string, unknown>;
+  const total = rec.total;
+  if (!total || typeof total !== "object" || Array.isArray(total)) return null;
+  const n = asNumberish((total as Record<string, unknown>).val);
+  if (n == null) return null;
+  if (!cents && !Array.isArray(rec.changes)) return null;
+  const usd = n / 100;
+  return {
+    ok: true,
+    source: "prepaid",
+    balanceUsd: usd,
+    label: usdLabel(usd),
+    note: "上游预付余额。",
+  };
+}
+
+const BALANCE_KEYS = new Set([
+  "balance",
+  "total_balance",
+  "remaining_balance",
+  "available_balance",
+  "credit",
+  "credits",
+  "quota",
+  "usd",
+  "amount",
+]);
+const SKIP_WALK = new Set(["usage", "changes", "balance_infos"]);
+
+function parseGenericBalance(json: unknown): UpstreamProbe | null {
+  const hits: { key: string; n: number }[] = [];
+  walkBalance(json, 0, hits);
+  if (!hits.length) return null;
+  return {
+    ok: true,
+    source: "generic",
+    label: hits
+      .map((h) => (h.key === "usd" ? currencyLabel("USD", h.n) : `${h.key} ${currencyLabel("", h.n)}`))
+      .join(" · "),
+    note: `上游余额（${hits.map((h) => h.key).join(", ")}）。`,
+    ...(hits.length === 1 && hits[0].key === "usd" ? { balanceUsd: hits[0].n } : {}),
+  };
+}
+
+function walkBalance(node: unknown, depth: number, hits: { key: string; n: number }[]): void {
+  if (!node || typeof node !== "object" || Array.isArray(node) || hits.length >= 3) return;
+  for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+    if (hits.length >= 3) return;
+    const key = k.toLowerCase();
+    if (SKIP_WALK.has(key)) continue;
+    if (BALANCE_KEYS.has(key)) {
+      const n = asNumberish(v);
+      if (n != null) {
+        hits.push({ key, n });
+        continue;
+      }
+    }
+    if (depth < 2 && v && typeof v === "object" && !Array.isArray(v)) walkBalance(v, depth + 1, hits);
+  }
 }
 
 export async function timingSafeEqualString(a: string, b: string): Promise<boolean> {

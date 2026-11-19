@@ -65,7 +65,7 @@ npx wrangler secret put DEEPSEEK_API_KEY
 | --- | --- | --- |
 | Secret | `ADMIN_TOKEN` | 管理后台口令 |
 | Secret | `{ID}_API_KEY` | `PROVIDERS` 里每个 `id` 对应一把 Key |
-| var | `PROVIDERS` | JSON 数组，上游账号列表。没写模型前缀时走第一个配了密钥的 |
+| var | `PROVIDERS` | JSON 数组，上游账号列表。没写模型前缀时走第一个配了密钥的。每项可加 `quota` 声明余额查询 |
 | var | `MODEL_ALIASES` | JSON 对象，例如 `{"gpt-4":"opencode/gpt-5.4"}` |
 | var | `DEFAULT_QUOTA_TOKENS` | 签发 Key 的默认 token 额度，默认 `1000000`；`0` 表示不限额 |
 
@@ -145,12 +145,19 @@ Settings → Models → 打开 Override OpenAI Base URL → 填 `https://<worker
 
 计数来源：上游响应里的 `usage.total_tokens`（流式会补 `stream_options.include_usage`）。上游不回头条时，按请求体大约 4 字符 = 1 token 估。
 
-**你自己配的上游 Key 还剩多少：** 大多数厂商（包括 OpenCode Zen 预付钱包）不让 API Key 查余额，只能打开对方网页控制台看。本站能做的是：
+**上游还剩多少：** 在对应 provider 上加 `quota`。后台打开时用这个请求去查，认出余额就显示在「余额」列。没配 `quota` 的上游只显示本站自己累计的消耗。
 
-- 把经本站打出去的 token 按上游汇总，后台「本站已消耗」就是这个数
-- 若这把 Key 其实是 OpenCode Go 订阅，会额外试 `GET /zen/go/v1/usage`，能返回就显示套餐窗口剩余百分比
+```jsonc
+{
+  "id": "deepseek",
+  "baseUrl": "https://api.deepseek.com/v1",
+  "quota": { "url": "https://api.deepseek.com/user/balance" }
+}
+```
 
-这不是对方账户的实时钱包，只覆盖走过这个 Worker 的流量。
+`url` 可以写完整地址，或以 `/` 开头（拼到 `baseUrl` 的源站，不含 `/v1`）。不写 `secret` 就用这把上游的 `{ID}_API_KEY`。要另一把钥匙（例如 xAI management key）时，`secret` 填环境变量名，值用 `wrangler secret put`，不要写进 jsonc。路径里的账号 id 用 `${ENV_NAME}`，同样从环境变量读。`cents: true` 表示响应里的 `total.val` 是美分。`method: "POST"` 时可带 `body`。
+
+能认出的响应：DeepSeek `balance_infos`、xAI `total.val`（美分）、OpenCode 的 `usd` / 套餐窗口百分比，以及常见的 `balance` / `credit` / `usd` 数字。没配 `quota` 且上游是 OpenCode 时，仍会试 Go 用量和钱包接口。
 
 上下文存在 Durable Object 里（强一致）。超过约 80 条或体积过大时会丢掉最旧的非 system 轮。
 

@@ -22,7 +22,9 @@ import {
   parseModelsResponse,
   parseOpencodeBalance,
   parseOpencodeGoUsage,
+  parseQuotaPayload,
   parseQuotaInput,
+  resolveQuotaUrl,
   pickUpstream,
   loadProviders,
   mintAdminSession,
@@ -66,6 +68,25 @@ test("parse config JSON", () => {
   assert.deepEqual(parseProviders([{ id: " grok ", baseUrl: " https://api.x.ai/v1 " }]), [
     { id: "grok", baseUrl: "https://api.x.ai/v1" },
   ]);
+  assert.deepEqual(
+    parseProviders([
+      {
+        id: "grok",
+        baseUrl: "https://api.x.ai/v1",
+        quota: { url: " https://management-api.x.ai/v1/x ", secret: " GROK_MANAGEMENT_KEY ", cents: true, method: "get" },
+      },
+    ]),
+    [
+      {
+        id: "grok",
+        baseUrl: "https://api.x.ai/v1",
+        quota: { url: "https://management-api.x.ai/v1/x", secret: "GROK_MANAGEMENT_KEY", cents: true },
+      },
+    ],
+  );
+  assert.deepEqual(parseProviders([{ id: "deepseek", baseUrl: "https://api.deepseek.com/v1", quota: { secret: "X" } }]), [
+    { id: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
+  ]);
   assert.deepEqual(parseJsonObject('{"gpt-4":"opencode/gpt-5.4"}'), { "gpt-4": "opencode/gpt-5.4" });
   assert.deepEqual(parseJsonObject({ "gpt-4": "opencode/gpt-5.4" }), { "gpt-4": "opencode/gpt-5.4" });
   assert.throws(
@@ -88,6 +109,48 @@ test("providers come only from PROVIDERS", () => {
   });
   assert.deepEqual(extras.publicList.map((p) => p.id), ["grok", "opencode"]);
   assert.deepEqual(extras.live.map((p) => p.id), ["grok"]);
+
+  const quota = loadProviders({
+    PROVIDERS: [
+      {
+        id: "grok",
+        baseUrl: "https://api.x.ai/v1/",
+        quota: {
+          url: "https://management-api.x.ai/v1/billing/teams/${GROK_TEAM_ID}/prepaid/balance",
+          secret: "GROK_MANAGEMENT_KEY",
+          cents: true,
+        },
+      },
+      { id: "deepseek", baseUrl: "https://api.deepseek.com/v1", quota: { url: "/user/balance" } },
+    ],
+    GROK_API_KEY: "g",
+    GROK_MANAGEMENT_KEY: " mk ",
+    GROK_TEAM_ID: "team-1",
+    DEEPSEEK_API_KEY: "d",
+  });
+  assert.equal(quota.live[0].baseUrl, "https://api.x.ai/v1");
+  assert.equal(quota.live[0].quotaKey, "mk");
+  assert.equal(quota.live[0].apiKey, "g");
+  assert.equal(
+    quota.live[0].quota?.url,
+    "https://management-api.x.ai/v1/billing/teams/team-1/prepaid/balance",
+  );
+  assert.equal(quota.live[1].quotaKey, "d");
+  assert.equal(resolveQuotaUrl(quota.live[1].baseUrl, quota.live[1].quota?.url ?? ""), "https://api.deepseek.com/user/balance");
+  assert.equal("apiKey" in quota.publicList[0], false);
+
+  const missing = loadProviders({
+    PROVIDERS: [
+      {
+        id: "grok",
+        baseUrl: "https://api.x.ai/v1",
+        quota: { url: "https://management-api.x.ai/v1/billing/teams/${GROK_TEAM_ID}/prepaid/balance", secret: "GROK_MANAGEMENT_KEY" },
+      },
+    ],
+    GROK_API_KEY: "g",
+  });
+  assert.equal(missing.live[0].quotaKey, "");
+  assert.equal(missing.live[0].quotaError, "额度地址缺少 GROK_TEAM_ID");
 });
 
 test("pickUpstream default + prefix + alias", () => {
@@ -320,6 +383,26 @@ test("quota helpers and usage parse", () => {
   assert.equal(go?.ok, true);
   assert.equal(go?.windows?.find((w) => w.name === "monthly")?.remainingPercent, 60);
   assert.equal(parseOpencodeBalance({ balance: { usd: 4.1 } })?.balanceUsd, 4.1);
+  assert.equal(
+    parseQuotaPayload({
+      is_available: true,
+      balance_infos: [{ currency: "CNY", total_balance: "110.00", granted_balance: "10.00", topped_up_balance: "100.00" }],
+    })?.label,
+    "¥110.00",
+  );
+  assert.equal(parseQuotaPayload({ is_available: false, balance_infos: [{ currency: "USD", total_balance: "0" }] })?.label, "$0.00（不可用）");
+  assert.equal(parseQuotaPayload({ total: { val: "1000" }, changes: [] })?.label, "$10.00");
+  assert.equal(parseQuotaPayload({ total: { val: "250" } }, { cents: true })?.balanceUsd, 2.5);
+  assert.equal(parseQuotaPayload({ total: { val: "250" } }), null);
+  assert.equal(parseQuotaPayload({ balance: { usd: 4.1 } })?.label, "$4.10");
+  assert.equal(
+    parseQuotaPayload({ usage: { monthly: { percent: 40 }, rolling: { percent: 10 } } })?.label,
+    "rolling剩 90% · monthly剩 60%",
+  );
+  assert.equal(parseQuotaPayload({ account: { credit: "8.5" } })?.label, "credit 8.50");
+  assert.equal(parseQuotaPayload({ nope: true }), null);
+  assert.equal(resolveQuotaUrl("https://api.deepseek.com/v1", "/user/balance"), "https://api.deepseek.com/user/balance");
+  assert.equal(resolveQuotaUrl("https://api.deepseek.com/v1", "file:///etc/passwd"), null);
 });
 
 test("admin session cookie is signed, expiring, not the raw token", async () => {

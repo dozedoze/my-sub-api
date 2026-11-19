@@ -129,7 +129,19 @@ export function adminHtml(origin: string): string {
     th { color: var(--muted); font-weight: 500; }
     #provider-usage table { table-layout: fixed; }
     #provider-usage td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #provider-usage td:last-child { overflow: visible; }
+    #provider-usage td:last-child,
+    #provider-usage td.balance { overflow: visible; position: relative; }
+    #provider-usage td.balance .clip {
+      display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #provider-usage .bubble {
+      display: none; position: absolute; z-index: 6; left: 0; top: calc(100% + 4px);
+      width: max-content; max-width: 380px; white-space: normal;
+      background: #0d1118; border: 1px solid var(--line); border-radius: 10px;
+      padding: 8px 10px; color: var(--text); font-size: 12px; line-height: 1.55;
+      box-shadow: 0 10px 28px rgba(0,0,0,.45);
+    }
+    #provider-usage td.balance:hover .bubble { display: block; }
     .keys-wrap { overflow-x: auto; }
     .keys {
       table-layout: fixed;
@@ -461,6 +473,29 @@ function renderStatus(status) {
   renderProviderUsage(status.providers || []);
 }
 
+function balanceLines(u, text) {
+  const lines = [];
+  if (u && Array.isArray(u.detail)) {
+    for (const line of u.detail) if (line) lines.push(line);
+  } else if (u && u.label && u.label !== text) {
+    lines.push(u.label);
+  }
+  if (u && u.windows && !lines.length) {
+    for (const w of u.windows) {
+      let line = w.name + " 已用 " + Math.round(w.percent) + "% · 剩余 " + Math.round(w.remainingPercent) + "%";
+      if (w.resetsAt) line += " · 重置 " + w.resetsAt;
+      if (w.status && w.status !== "ok") line += " · " + w.status;
+      lines.push(line);
+    }
+  }
+  if (u && typeof u.usedTokens === "number") {
+    lines.push("账单累计 " + fmtTokens(u.usedTokens) + (u.usageIncomplete ? "（未拉全，含未经过本站的调用）" : "（含未经过本站的调用）"));
+  }
+  if (u && u.note && lines.indexOf(u.note) < 0) lines.push(u.note);
+  if (!lines.length && text) lines.push(text);
+  return lines;
+}
+
 function renderProviderUsage(providers) {
   const box = document.getElementById("provider-usage");
   box.replaceChildren();
@@ -523,9 +558,22 @@ function renderProviderUsage(providers) {
         text = bit;
       }
     }
-    if (muted) up.className = "hint";
-    up.textContent = text;
-    up.title = (u && u.note) || text;
+    up.className = muted ? "hint balance" : "balance";
+    const clip = document.createElement("span");
+    clip.className = "clip";
+    clip.textContent = text;
+    up.appendChild(clip);
+    const lines = balanceLines(u, text);
+    if (lines.length) {
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      for (const line of lines) {
+        const row = document.createElement("div");
+        row.textContent = line;
+        bubble.appendChild(row);
+      }
+      up.appendChild(bubble);
+    }
     const act = document.createElement("td");
     if (p.configured) {
       const btn = document.createElement("button");

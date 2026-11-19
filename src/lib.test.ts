@@ -31,6 +31,7 @@ import {
   pickUpstream,
   extraPaidChannel,
   goAllowanceBlocks,
+  modelAllowed,
   isGoSubscription,
   loadProviders,
   mintAdminSession,
@@ -170,6 +171,39 @@ test("extra paid channels stay offline", () => {
   assert.equal(goAllowanceBlocks({ usage: { monthly: { percent: 100 } } }, "glm-5.3"), true);
   assert.equal(goAllowanceBlocks({ usage: { monthly: { percent: 100 } } }, "hy4-flash-free"), false);
   assert.equal(goAllowanceBlocks({ usage: { monthly: { percent: 40 } } }, "glm-5.3"), false);
+  assert.equal(
+    goAllowanceBlocks({ usage: { rolling: { percent: 20, status: "rate-limited" } } }, "qwen3.7-plus"),
+    true,
+  );
+  const opencode = { id: "opencode", baseUrl: "https://opencode.ai/zen/go/v1" };
+  const grok = { id: "grok", baseUrl: "https://api.x.ai/v1" };
+  for (const id of ["grok-4.6", "grok-4.7", "qwen3.7-plus", "qwen3.8-flash", "qwen4-max", "kimi-k3"]) {
+    assert.equal(modelAllowed(opencode, id), true, id);
+  }
+  for (const id of ["grok-4.5", "qwen3.8-max", "qwen3.6-plus", "kimi-k3.1-pro", "glm-5.3", "kimi-k2.7-code"]) {
+    assert.equal(modelAllowed(opencode, id), false, id);
+  }
+  assert.equal(modelAllowed(grok, "grok-4.7"), true);
+  assert.equal(modelAllowed(grok, "grok-4.6-fast"), true);
+  assert.equal(modelAllowed(grok, "grok-4"), false);
+  assert.equal(modelAllowed({ id: "deepseek", baseUrl: "https://api.deepseek.com/v1" }, "deepseek-chat"), true);
+  const detail = parseOpencodeGoUsage({
+    usage: {
+      rolling: { percent: 10, status: "ok", resetsAt: "2026-11-19T07:03:00.000Z" },
+      monthly: { percent: 40, status: "rate-limited", resetsAt: "2026-12-01T00:00:00.000Z" },
+    },
+  });
+  assert.deepEqual(detail?.detail, [
+    "5 小时：已用 10%，剩余 90%，正常，重置 2026-11-19 15:03",
+    "本月：已用 40%，剩余 60%，已限流，重置 2026-12-01 08:00",
+  ]);
+  assert.deepEqual(
+    parseQuotaPayload({
+      is_available: true,
+      balance_infos: [{ currency: "CNY", total_balance: "110.00", granted_balance: "10.00", topped_up_balance: "100.00" }],
+    })?.detail,
+    ["CNY 总额 ¥110.00", "CNY 赠送 ¥10.00", "CNY 充值 ¥100.00"],
+  );
 
   const got = loadProviders({
     PROVIDERS: [

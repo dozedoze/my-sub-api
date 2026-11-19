@@ -24,6 +24,7 @@ import {
   exposeModels,
   failoverAction,
   parseJsonObject,
+  modelAllowed,
   parseModelsResponse,
   parseOpencodeBalance,
   parseOpencodeGoUsage,
@@ -340,6 +341,7 @@ async function probeUpstream(provider: Provider): Promise<UpstreamProbe> {
       windows: parsedGo.windows,
       label: [parsedBal.label, parsedGo.label].filter(Boolean).join(" · "),
       note: "上游钱包余额 + Go 套餐用量。",
+      detail: [...(parsedBal.detail ?? []), ...(parsedGo.detail ?? [])],
     };
   }
   if (parsedBal?.ok) return parsedBal;
@@ -492,6 +494,9 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: st
   if (payload && typeof payload === "object" && picked.model) {
     (payload as { model: string }).model = picked.model;
   }
+  if (picked.model && !modelAllowed(picked.provider, picked.model)) {
+    throw new GatewayError(400, "model_not_allowed", `Model '${picked.model}' is not enabled on this upstream`);
+  }
 
   const fallbackQuota = defaultQuotaTokens(env.DEFAULT_QUOTA_TOKENS);
   const quota = effectiveQuota(issued, fallbackQuota);
@@ -631,7 +636,7 @@ async function fetchUpstreamModels(provider: Provider): Promise<string[]> {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return [];
-    return parseModelsResponse(await res.json());
+    return parseModelsResponse(await res.json()).filter((id) => modelAllowed(provider, id));
   } catch {
     return [];
   }

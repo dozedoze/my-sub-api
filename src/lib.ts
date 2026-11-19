@@ -214,11 +214,45 @@ export function isGoSubscription(baseUrl: string): boolean {
   return path.startsWith("/zen/go") || path.startsWith("/inference/go");
 }
 
+const OPENCODE_MODEL_KEEP = [
+  /^grok-4\.6(?:$|[-_])/,
+  /^grok-4\.7(?:$|[-_])/,
+  /^qwen3\.7(?:$|[-_.])/,
+  /^qwen-3\.7(?:$|[-_.])/,
+  /^qwen3\.8-flash(?:$|[-_])/,
+  /^qwen-3\.8-flash(?:$|[-_])/,
+  /^qwen4-max(?:$|[-_])/,
+  /^qwen-4-max(?:$|[-_])/,
+  /^kimi-k3(?:$|[-_])/,
+  /^k3(?:$|[-_])/,
+];
+
+function providerHost(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** OpenCode 只放行 grok 4.6/4.7、千问 3.7、千问 3.8 flash、qwen4-max、kimi-k3。xAI 只放行 4.6/4.7。 */
+export function modelAllowed(provider: { id: string; baseUrl: string }, model: string): boolean {
+  const host = providerHost(provider.baseUrl);
+  const opencode = host === "opencode.ai" || host.endsWith(".opencode.ai");
+  const xai = provider.id === "grok" || host === "x.ai" || host.endsWith(".x.ai");
+  if (!opencode && !xai) return true;
+  const id = model.trim().toLowerCase();
+  if (!id) return true;
+  const tail = id.slice(id.lastIndexOf("/") + 1);
+  if (opencode) return OPENCODE_MODEL_KEEP.some((re) => re.test(tail));
+  return /(?:^|[^0-9])4\.6(?:[^0-9]|$)/.test(tail) || /(?:^|[^0-9])4\.7(?:[^0-9]|$)/.test(tail);
+}
+
 /** Go 套餐窗口已满时，付费模型再打就会落到 Extra Usage。免费模型不占额度。 */
 export function goAllowanceBlocks(json: unknown, model: string): boolean {
   if (/(^|[-_/])free($|[-_/])/i.test(model)) return false;
   const parsed = parseOpencodeGoUsage(json);
-  return Boolean(parsed?.windows?.some((w) => w.percent >= 100));
+  return Boolean(parsed?.windows?.some((w) => w.percent >= 100 || w.status === "rate-limited"));
 }
 
 export function loadProviders(env: object & { PROVIDERS?: unknown }): {
@@ -454,6 +488,8 @@ export type UpstreamWindow = {
   percent: number;
   remainingPercent: number;
   resetsAt?: string;
+  /** 上游原样状态，例如 ok、rate-limited。 */
+  status?: string;
 };
 
 export type UpstreamProbe = {
@@ -462,6 +498,8 @@ export type UpstreamProbe = {
   note: string;
   /** 后台直接展示的余额文案。 */
   label?: string;
+  /** 悬浮层逐行展示。表格单元格仍只用 label。 */
+  detail?: string[];
   windows?: UpstreamWindow[];
   balanceUsd?: number;
   /** xAI 账单里的 token 合计，含没经过本站的调用。 */
@@ -558,6 +596,7 @@ export function parseOpencodeGoUsage(json: unknown): UpstreamProbe | null {
       percent,
       remainingPercent: Math.max(0, 100 - percent),
       resetsAt: typeof rec.resetsAt === "string" ? rec.resetsAt : undefined,
+      status: typeof rec.status === "string" ? rec.status : undefined,
     });
   }
   if (!windows.length) return null;
@@ -567,6 +606,7 @@ export function parseOpencodeGoUsage(json: unknown): UpstreamProbe | null {
     note: "OpenCode Go 套餐用量（不是 Zen 预付钱包）。",
     windows,
     label: windowsLabel(windows),
+    detail: windows.map(windowDetail),
   };
 }
 
@@ -582,6 +622,7 @@ export function parseOpencodeBalance(json: unknown): UpstreamProbe | null {
     note: "上游返回的钱包余额。",
     balanceUsd: usd,
     label: usdLabel(usd),
+    detail: [`钱包余额 ${usdLabel(usd)}`],
   };
 }
 
@@ -591,6 +632,32 @@ function usdLabel(usd: number): string {
 
 function windowsLabel(windows: UpstreamWindow[]): string {
   return windows.map((w) => `${w.name}剩 ${Math.round(w.remainingPercent)}%`).join(" · ");
+}
+
+const WINDOW_LABEL: Record<string, string> = {
+  rolling: "5 小时",
+  weekly: "7 天",
+  monthly: "本月",
+};
+
+function fmtPct(n: number): string {
+  return Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10);
+}
+
+/** ponytail: 后台按东八区显示。要跟随浏览器时区再改到前端格式化。 */
+function formatReset(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  const d = new Date(t + 8 * 3600_000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+function windowDetail(w: UpstreamWindow): string {
+  const name = WINDOW_LABEL[w.name] ?? w.name;
+  const status = w.status === "rate-limited" ? "已限流" : !w.status || w.status === "ok" ? "正常" : w.status;
+  const reset = w.resetsAt ? `，重置 ${formatReset(w.resetsAt)}` : "";
+  return `${name}：已用 ${fmtPct(w.percent)}%，剩余 ${fmtPct(w.remainingPercent)}%，${status}${reset}`;
 }
 
 function asNumberish(value: unknown): number | null {
@@ -619,6 +686,7 @@ export function parseQuotaPayload(json: unknown, opts?: { cents?: boolean }): Up
       windows: go.windows,
       label: [bal.label, go.label].filter(Boolean).join(" · "),
       note: "上游钱包余额 + Go 套餐用量。",
+      detail: [...(bal.detail ?? []), ...(go.detail ?? [])],
     };
   }
   if (bal?.ok) return bal;
@@ -646,7 +714,30 @@ function parseAccountBalance(json: unknown): UpstreamProbe | null {
     source: "account_balance",
     label: parts.join(" · ") + (dead ? "（不可用）" : ""),
     note: "上游账户余额。",
+    detail: accountDetail(infos, dead),
   };
+}
+
+const BALANCE_FIELD: Record<string, string> = {
+  total_balance: "总额",
+  granted_balance: "赠送",
+  topped_up_balance: "充值",
+};
+
+function accountDetail(infos: unknown[], dead: boolean): string[] {
+  const lines: string[] = [];
+  for (const item of infos) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const currency = typeof row.currency === "string" ? row.currency.trim().toUpperCase() : "";
+    for (const key of ["total_balance", "granted_balance", "topped_up_balance"]) {
+      const n = asNumberish(row[key]);
+      if (n == null) continue;
+      lines.push(`${currency ? currency + " " : ""}${BALANCE_FIELD[key]} ${currencyLabel(currency, n)}`);
+    }
+  }
+  if (dead) lines.push("账户不可用");
+  return lines;
 }
 
 function parsePrepaidCents(json: unknown, cents: boolean): UpstreamProbe | null {
@@ -664,6 +755,7 @@ function parsePrepaidCents(json: unknown, cents: boolean): UpstreamProbe | null 
     balanceUsd: usd,
     label: usdLabel(usd),
     note: "上游预付余额。",
+    detail: [`预付余额 ${usdLabel(usd)}`],
   };
 }
 
@@ -684,13 +776,13 @@ function parseGenericBalance(json: unknown): UpstreamProbe | null {
   const hits: { key: string; n: number }[] = [];
   walkBalance(json, 0, hits);
   if (!hits.length) return null;
+  const lines = hits.map((h) => (h.key === "usd" ? currencyLabel("USD", h.n) : `${h.key} ${currencyLabel("", h.n)}`));
   return {
     ok: true,
     source: "generic",
-    label: hits
-      .map((h) => (h.key === "usd" ? currencyLabel("USD", h.n) : `${h.key} ${currencyLabel("", h.n)}`))
-      .join(" · "),
+    label: lines.join(" · "),
     note: `上游余额（${hits.map((h) => h.key).join(", ")}）。`,
+    detail: lines,
     ...(hits.length === 1 && hits[0].key === "usd" ? { balanceUsd: hits[0].n } : {}),
   };
 }

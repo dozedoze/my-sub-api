@@ -13,6 +13,7 @@ import {
   type ChatMessage,
   type Provider,
 } from "./lib.ts";
+import { loadAutoModels } from "./keys.ts";
 
 export type AutoRoute = { easy: string; hard: string[] };
 export type AutoTier = "easy" | "hard";
@@ -78,6 +79,11 @@ export function resolveAutoRoute(stored: unknown): { route: AutoRoute; saved: bo
   const route = parseAutoRoute(stored);
   if (!route) return { route: DEFAULT_AUTO_ROUTE, saved: false };
   return { route, saved: true };
+}
+
+/** 后台存过的档位；没存过就用内置顺序。 */
+export async function currentAuto(kv: KVNamespace): Promise<{ route: AutoRoute; saved: boolean }> {
+  return resolveAutoRoute(await loadAutoModels(kv));
 }
 
 /** 钉住的模型放最前。它失败再试后面的，最后才回头试更优先的。 */

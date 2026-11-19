@@ -981,10 +981,16 @@ export function applyChatSseLine(acc: { content: string; tokens?: number }, line
   const data = trimmed.slice(5).trim();
   if (!data || data === "[DONE]") return;
   try {
-    const json = JSON.parse(data) as { choices?: { delta?: { content?: unknown } }[] };
+    const json = JSON.parse(data) as {
+      choices?: { delta?: { content?: unknown } }[];
+      type?: string;
+      response?: unknown;
+    };
     const chunk = json.choices?.[0]?.delta?.content;
     if (typeof chunk === "string") acc.content += chunk;
-    const n = tokensFromUsage(json);
+    const usageSource =
+      json.type === "response.completed" || json.type === "response.incomplete" ? (json.response ?? json) : json;
+    const n = tokensFromUsage(usageSource);
     if (n != null) acc.tokens = n;
   } catch {
     /* ignore malformed sse line */

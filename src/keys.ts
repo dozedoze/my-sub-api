@@ -5,7 +5,7 @@ import {
   toPublicKey,
   type KeyPublic,
   type KeyRecord,
-} from "./lib";
+} from "./lib.ts";
 
 const ID_PREFIX = "id:";
 const HASH_PREFIX = "hash:";

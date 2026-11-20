@@ -23,6 +23,10 @@ export type Provider = {
   id: string;
   baseUrl: string;
   apiKey: string;
+  /** Claude /v1/messages 转发到这家上游时用的协议。不写则按地址猜测。 */
+  messages?: "chat" | "responses" | "anthropic";
+  /** Responses 上游是否托管 web_search。不写则只认 xAI / OpenAI。 */
+  hostedSearch?: boolean;
   quota?: QuotaQuery;
   /** 空字符串表示 quota.secret 在环境里没有值。 */
   quotaKey?: string;
@@ -40,6 +44,8 @@ export type ProviderPublic = {
 export type ProviderConfig = {
   id: string;
   baseUrl: string;
+  messages?: "chat" | "responses" | "anthropic";
+  hostedSearch?: boolean;
   quota?: QuotaQuery;
 };
 
@@ -283,7 +289,15 @@ export function parseProviders(raw: unknown): ProviderConfig[] {
     const baseUrl = rec.baseUrl.trim();
     if (!id || !baseUrl) continue;
     const quota = parseQuota(rec.quota);
-    out.push(quota ? { id, baseUrl, quota } : { id, baseUrl });
+    const messages = rec.messages === "chat" || rec.messages === "responses" || rec.messages === "anthropic" ? rec.messages : undefined;
+    const hostedSearch = rec.hostedSearch === true ? true : rec.hostedSearch === false ? false : undefined;
+    out.push({
+      id,
+      baseUrl,
+      ...(quota ? { quota } : {}),
+      ...(messages ? { messages } : {}),
+      ...(hostedSearch !== undefined ? { hostedSearch } : {}),
+    });
   }
   return out;
 }

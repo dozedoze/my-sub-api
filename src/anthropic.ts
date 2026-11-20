@@ -1,8 +1,7 @@
-/** Claude Code 走 /v1/messages。按上游实际协议改写：
- * Grok 走 responses，reasoning 项放进 thinking.signature，下一轮原样带回。
- * DeepSeek、OpenCode 千问走各自的 Anthropic messages，思考块原样往返。
- * Kimi 等 chat 模型把 reasoning_content 放进 thinking 文本，下一轮写回该字段。
- * 工具结果里的图片丢掉，只留文本。
+/** Claude 客户端走 /v1/messages，按上游协议改写，不按模型名分支。
+ * responses：reasoning 放进 thinking.signature。chat：reasoning_content 放进 thinking 文本。
+ * anthropic：思考块原样往返。工具结果里的图片丢掉，只留文本。
+ * 客户端函数工具一律保留。服务端工具只在该上游真能执行时映射，否则丢掉，并改掉悬空的 tool_choice。
  */
 
 export type MessagesWire = "anthropic" | "chat" | "responses";
@@ -42,12 +41,11 @@ function opencodeHost(host: string): boolean {
   return host === "opencode.ai" || host.endsWith(".opencode.ai");
 }
 
-/** 目录来自 https://opencode.ai/zen/go/v1/models 的 api 字段。
- * OpenCode：Grok/GPT 走 responses，千问/Claude 走 messages，GLM 等走 chat。
- * 独立上游：xAI responses，DeepSeek/Anthropic messages，OpenAI 的 gpt-5+/o 系列 responses。 */
-export function messagesWire(baseUrl: string, model: string): MessagesWire {
+/** 上游在配置里写了 messages 就用那个。没写才按地址猜：未知上游默认 chat。 */
+export function messagesWire(baseUrl: string, model: string, declared?: MessagesWire): MessagesWire {
+  if (declared) return declared;
   const host = hostOf(baseUrl);
-  if (!host) return "anthropic";
+  if (!host) return "chat";
   const name = modelName(model);
   if (host === "x.ai" || host.endsWith(".x.ai")) return "responses";
   if (host === "deepseek.com" || host.endsWith(".deepseek.com")) return "anthropic";
@@ -88,13 +86,47 @@ export function relaxToolChoice(body: Record<string, unknown>): Record<string, u
   return { ...body, tool_choice: { type: "auto" } };
 }
 
+/** 客户端自己会执行的工具。带版本号的服务端工具、computer 这类没有函数 schema 的类型不算。 */
+function isClientTool(tool: Record<string, unknown>): boolean {
+  if (typeof tool.name !== "string" || !tool.name) return false;
+  if (typeof tool.type !== "string") return true;
+  return tool.type === "custom" || tool.type === "function";
+}
+
+/** 非 Anthropic 官方的 messages 上游不托管服务端工具。滤掉之后不能留悬空的 tool_choice。 */
+function withoutUnhosted(body: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(body.tools) && body.tool_choice === undefined) return body;
+  const tools = (Array.isArray(body.tools) ? body.tools : []).filter((tool) => {
+    const rec = asRecord(tool);
+    return rec != null && isClientTool(rec);
+  });
+  if (!tools.length) {
+    const { tools: _tools, tool_choice: _choice, ...rest } = body;
+    return rest;
+  }
+  const choice = asRecord(body.tool_choice);
+  if (choice?.type === "tool" && !tools.some((tool) => asRecord(tool)?.name === choice.name)) {
+    return { ...body, tools, tool_choice: { type: "auto" } };
+  }
+  return { ...body, tools };
+}
+
+function anthropicOfficial(baseUrl: string): boolean {
+  const host = hostOf(baseUrl);
+  return host === "anthropic.com" || host.endsWith(".anthropic.com");
+}
+
 export function prepareAnthropic(baseUrl: string, body: Record<string, unknown>): Record<string, unknown> {
+  if (anthropicOfficial(baseUrl)) return body;
   const host = hostOf(baseUrl);
   const deepseek = host === "deepseek.com" || host.endsWith(".deepseek.com");
   const opencode = opencodeHost(host);
-  if (!opencode && !deepseek) return body;
-  const { output_config: _oc, context_management: _cm, ...rest } = relaxToolChoice(body);
-  let next: Record<string, unknown> = rest;
+  let next = relaxToolChoice(body);
+  if (opencode || deepseek) {
+    const { output_config: _oc, context_management: _cm, ...rest } = next;
+    next = rest;
+  }
+  next = withoutUnhosted(next);
   const thinking = asRecord(next.thinking);
   if (opencode && thinking?.type === "adaptive") {
     next = {
@@ -215,8 +247,7 @@ function convertTools(tools: unknown): unknown[] {
   const out: unknown[] = [];
   for (const tool of tools) {
     const rec = asRecord(tool);
-    if (!rec || typeof rec.name !== "string" || !rec.name) continue;
-    if (typeof rec.type === "string" && rec.type !== "custom" && rec.type !== "function") continue;
+    if (!rec || !isClientTool(rec)) continue;
     const schema = asRecord(rec.input_schema);
     out.push({
       type: "function",
@@ -267,15 +298,52 @@ export function messagesToChat(
   if (Array.isArray(body.stop_sequences)) out.stop = body.stop_sequences;
   const tools = convertTools(body.tools);
   if (tools.length) out.tools = tools;
-  const choice = convertToolChoice(body.tool_choice, anyToolChoice);
+  const choice = keptChoice(body.tool_choice, tools, anyToolChoice);
   if (choice !== undefined) out.tool_choice = choice;
   const meta = asRecord(body.metadata);
   if (meta && typeof meta.user_id === "string" && meta.user_id) out.user = meta.user_id;
   return out;
 }
 
-function responseTools(tools: unknown): unknown[] {
+function isServerWebSearch(tool: Record<string, unknown>): boolean {
+  return tool.name === "web_search" && typeof tool.type === "string" && /^web_search_\d{8}$/.test(tool.type);
+}
+
+function domainList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || !item) continue;
+    out.push(item);
+    if (out.length === 5) break;
+  }
+  return out;
+}
+
+/** xAI / OpenAI 的 Responses 托管搜索。ponytail: 允许名单和排除名单不能同时给，各最多 5 个；两边都有时留允许名单。 */
+function hostedWebSearch(tool: Record<string, unknown>): Record<string, unknown> {
+  const allowed = domainList(tool.allowed_domains);
+  const excluded = domainList(tool.blocked_domains);
+  const filters: Record<string, string[]> = {};
+  if (allowed.length) filters.allowed_domains = allowed;
+  else if (excluded.length) filters.excluded_domains = excluded;
+  return Object.keys(filters).length ? { type: "web_search", filters } : { type: "web_search" };
+}
+
+function responsesHostedSearch(baseUrl: string, declared?: boolean): boolean {
+  if (declared != null) return declared;
+  const host = hostOf(baseUrl);
+  return host === "x.ai" || host.endsWith(".x.ai") || host === "openai.com" || host.endsWith(".openai.com");
+}
+
+function responseTools(tools: unknown, hostedSearch: boolean): unknown[] {
   const out: unknown[] = [];
+  if (hostedSearch && Array.isArray(tools)) {
+    for (const tool of tools) {
+      const rec = asRecord(tool);
+      if (rec && isServerWebSearch(rec)) out.push(hostedWebSearch(rec));
+    }
+  }
   for (const tool of convertTools(tools)) {
     const fn = asRecord(asRecord(tool)?.function);
     if (!fn || typeof fn.name !== "string") continue;
@@ -289,10 +357,34 @@ function responseTools(tools: unknown): unknown[] {
   return out;
 }
 
-function responseToolChoice(choice: unknown): unknown {
-  const picked = convertToolChoice(choice, "required");
-  const rec = asRecord(picked);
+function choiceName(choice: unknown): string {
+  const rec = asRecord(choice);
   const fn = asRecord(rec?.function);
+  if (typeof fn?.name === "string") return fn.name;
+  return rec?.type === "function" && typeof rec.name === "string" ? rec.name : "";
+}
+
+function hasToolName(tools: unknown[], name: string): boolean {
+  return tools.some((tool) => {
+    const item = asRecord(tool);
+    return item?.name === name || asRecord(item?.function)?.name === name;
+  });
+}
+
+/** 点名的工具被滤掉时，不要把这个 tool_choice 原样发出去。 */
+function keptChoice(choice: unknown, tools: unknown[], anyAs: "required" | "auto"): unknown {
+  if (!tools.length) return undefined;
+  const picked = convertToolChoice(choice, anyAs);
+  if (picked === undefined) return undefined;
+  const name = choiceName(picked);
+  if (!name || hasToolName(tools, name)) return picked;
+  const hostedOnly = tools.every((tool) => asRecord(tool)?.type === "web_search");
+  return hostedOnly ? "required" : "auto";
+}
+
+function responseToolChoice(choice: unknown, tools: unknown[]): unknown {
+  const picked = keptChoice(choice, tools, "required");
+  const fn = asRecord(asRecord(picked)?.function);
   if (fn && typeof fn.name === "string") return { type: "function", name: fn.name };
   return picked;
 }
@@ -353,7 +445,7 @@ function thinkingText(items: Record<string, unknown>[]): string {
   return " ";
 }
 
-export function messagesToResponses(body: Record<string, unknown>): Record<string, unknown> {
+export function messagesToResponses(body: Record<string, unknown>, baseUrl = "", hostedSearch?: boolean): Record<string, unknown> {
   const input: Record<string, unknown>[] = [];
   const system = textOf(body.system);
   if (system) input.push({ role: "system", content: system });
@@ -403,9 +495,9 @@ export function messagesToResponses(body: Record<string, unknown>): Record<strin
   if (body.stream === true) out.stream = true;
   if (typeof body.temperature === "number") out.temperature = body.temperature;
   if (typeof body.top_p === "number") out.top_p = body.top_p;
-  const tools = responseTools(body.tools);
+  const tools = responseTools(body.tools, responsesHostedSearch(baseUrl, hostedSearch));
   if (tools.length) out.tools = tools;
-  const choice = responseToolChoice(body.tool_choice);
+  const choice = responseToolChoice(body.tool_choice, tools);
   if (choice !== undefined) out.tool_choice = choice;
   return out;
 }

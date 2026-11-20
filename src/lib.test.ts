@@ -130,6 +130,13 @@ test("parse config JSON", () => {
   assert.deepEqual(parseProviders([{ id: "deepseek", baseUrl: "https://api.deepseek.com/v1", quota: { secret: "X" } }]), [
     { id: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
   ]);
+  assert.deepEqual(
+    parseProviders([{ id: "m", baseUrl: "https://api.example.com/v1", messages: "responses", hostedSearch: true }]),
+    [{ id: "m", baseUrl: "https://api.example.com/v1", messages: "responses", hostedSearch: true }],
+  );
+  assert.deepEqual(parseProviders([{ id: "m", baseUrl: "https://api.example.com/v1", messages: "nope", hostedSearch: "yes" }]), [
+    { id: "m", baseUrl: "https://api.example.com/v1" },
+  ]);
   assert.deepEqual(parseJsonObject('{"gpt-4":"opencode/gpt-5.4"}'), { "gpt-4": "opencode/gpt-5.4" });
   assert.deepEqual(parseJsonObject({ "gpt-4": "opencode/gpt-5.4" }), { "gpt-4": "opencode/gpt-5.4" });
   assert.throws(

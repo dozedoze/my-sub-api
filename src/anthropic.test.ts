@@ -14,6 +14,42 @@ import {
   responsesToMessage,
 } from "./anthropic.ts";
 
+test("unknown upstreams follow the declared wire, otherwise chat", () => {
+  assert.equal(messagesWire("https://api.example.com/v1", "any-model", "responses"), "responses");
+  assert.equal(messagesWire("https://api.example.com/v1", "claude-x"), "chat");
+  assert.equal(messagesWire("", "claude-x"), "chat");
+  const forced = messagesToResponses(
+    {
+      model: "m",
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      tool_choice: { type: "auto" },
+    },
+    "https://api.example.com/v1",
+    true,
+  );
+  assert.equal((forced.tools as { type: string }[])[0].type, "web_search");
+  const off = messagesToResponses(
+    {
+      model: "m",
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      tool_choice: { type: "tool", name: "web_search" },
+    },
+    "https://api.x.ai/v1",
+    false,
+  );
+  assert.equal(off.tools, undefined);
+  assert.equal(off.tool_choice, undefined);
+  const other = prepareAnthropic("https://api.example.com/v1", {
+    tools: [
+      { name: "Bash", input_schema: { type: "object" } },
+      { type: "web_fetch_20250910", name: "web_fetch" },
+    ],
+    tool_choice: { type: "tool", name: "web_fetch" },
+  });
+  assert.equal((other.tools as { name: string }[])[0].name, "Bash");
+  assert.deepEqual(other.tool_choice, { type: "auto" });
+});
+
 test("messagesWire follows the upstream protocol", () => {
   assert.equal(messagesWire("https://api.x.ai/v1", "grok-4.6"), "responses");
   assert.equal(messagesWire("https://api.deepseek.com/v1", "deepseek-v4-pro"), "anthropic");
@@ -46,7 +82,10 @@ test("messagesWire follows the upstream protocol", () => {
   });
   assert.equal(relaxToolChoice({ model: "qwen4-max", tool_choice: { type: "any" } }).tool_choice.type, "auto");
   assert.deepEqual(
-    prepareAnthropic("https://api.deepseek.com/v1", { tool_choice: { type: "tool", name: "bash" } }).thinking,
+    prepareAnthropic("https://api.deepseek.com/v1", {
+      tool_choice: { type: "tool", name: "bash" },
+      tools: [{ name: "bash", input_schema: { type: "object" } }],
+    }).thinking,
     { type: "disabled" },
   );
   assert.deepEqual(
@@ -92,7 +131,14 @@ test("messagesToChat rewrites tools and tool results", () => {
   assert.equal(chat.stream, true);
   assert.deepEqual((chat.stream_options as { include_usage: boolean }).include_usage, true);
   assert.equal(chat.tool_choice, "required");
-  assert.equal(messagesToChat({ model: "deepseek-v4-pro", tool_choice: { type: "any" } }, "auto").tool_choice, "auto");
+  assert.equal(
+    messagesToChat(
+      { model: "deepseek-v4-pro", tool_choice: { type: "any" }, tools: [{ name: "bash", input_schema: { type: "object" } }] },
+      "auto",
+    ).tool_choice,
+    "auto",
+  );
+  assert.equal(messagesToChat({ model: "deepseek-v4-pro", tool_choice: { type: "any" } }, "auto").tool_choice, undefined);
   assert.equal((chat.tools as unknown[]).length, 1);
   assert.deepEqual(chat.messages, [
     { role: "system", content: "sys" },
@@ -210,6 +256,140 @@ test("chat sse becomes anthropic events", async () => {
   assert.equal((events[5].data?.delta as { partial_json: string }).partial_json, '{"a":1}');
   assert.equal((events[7].data?.delta as { stop_reason: string }).stop_reason, "tool_use");
   assert.equal((events[7].data?.usage as { output_tokens: number }).output_tokens, 5);
+});
+
+test("server tools survive only on an upstream that can run them", () => {
+  const body = {
+    model: "m",
+    tool_choice: { type: "tool" as const, name: "web_fetch" },
+    tools: [
+      { name: "Bash", description: "run", input_schema: { type: "object" } },
+      { type: "web_search_20250305", name: "web_search" },
+      { type: "web_fetch_20250910", name: "web_fetch" },
+      { type: "code_execution_20250522", name: "code_execution" },
+      { type: "tool_search_tool_regex_20251119", name: "tool_search_tool_regex" },
+      { type: "computer_20250124", name: "computer" },
+    ],
+  };
+  const names = (tools: unknown) =>
+    (tools as { name?: string; function?: { name?: string } }[]).map((tool) => tool.name ?? tool.function?.name);
+
+  const xai = messagesToResponses(body, "https://api.x.ai/v1");
+  assert.deepEqual(names(xai.tools), [undefined, "Bash"]);
+  assert.equal((xai.tools as { type: string }[])[0].type, "web_search");
+  assert.equal(xai.tool_choice, "auto");
+
+  const openai = messagesToResponses(body, "https://api.openai.com/v1");
+  assert.equal((openai.tools as { type: string }[])[0].type, "web_search");
+  assert.equal(openai.tool_choice, "auto");
+
+  for (const base of ["https://opencode.ai/zen/go/v1", "https://api.deepseek.com/v1"]) {
+    const res = messagesToResponses(body, base);
+    assert.deepEqual(names(res.tools), ["Bash"]);
+    assert.equal(res.tool_choice, "auto");
+  }
+  const chat = messagesToChat(body);
+  assert.deepEqual(names(chat.tools), ["Bash"]);
+  assert.equal(chat.tool_choice, "auto");
+
+  for (const base of ["https://api.deepseek.com/v1", "https://opencode.ai/zen/go/v1"]) {
+    const native = prepareAnthropic(base, body);
+    assert.deepEqual(names(native.tools), ["Bash"]);
+    assert.deepEqual(native.tool_choice, { type: "auto" });
+  }
+  const official = prepareAnthropic("https://api.anthropic.com/v1", body);
+  assert.equal((official.tools as unknown[]).length, body.tools.length);
+  assert.deepEqual(official.tool_choice, body.tool_choice);
+
+  const fetchOnly = {
+    model: "m",
+    tools: [{ type: "web_fetch_20250910", name: "web_fetch" }],
+    tool_choice: { type: "tool" as const, name: "web_fetch" },
+  };
+  for (const converted of [
+    messagesToResponses(fetchOnly, "https://api.x.ai/v1"),
+    messagesToResponses(fetchOnly, "https://opencode.ai/zen/go/v1"),
+    messagesToChat(fetchOnly),
+    prepareAnthropic("https://api.deepseek.com/v1", fetchOnly),
+  ]) {
+    assert.equal(converted.tools, undefined);
+    assert.equal(converted.tool_choice, undefined);
+  }
+});
+
+test("server web search becomes hosted search only on xAI and OpenAI", () => {
+  const tools = [
+    { name: "bash", description: "run", input_schema: { type: "object" } },
+    {
+      type: "web_search_20250305",
+      name: "web_search",
+      allowed_domains: ["a.com", "", "b.com", "c.com", "d.com", "e.com", "f.com"],
+      blocked_domains: ["spam.example"],
+    },
+    { type: "computer_20250124", name: "computer" },
+  ];
+  const xai = messagesToResponses(
+    { model: "grok-4.7", tools, tool_choice: { type: "tool", name: "web_search" } },
+    "https://api.x.ai/v1",
+  );
+  assert.deepEqual(xai.tools, [
+    { type: "web_search", filters: { allowed_domains: ["a.com", "b.com", "c.com", "d.com", "e.com"] } },
+    { type: "function", name: "bash", description: "run", parameters: { type: "object" } },
+  ]);
+  assert.equal(xai.tool_choice, "auto");
+  const only = messagesToResponses(
+    {
+      model: "grok-4.7",
+      tools: [{ type: "web_search_20250305", name: "web_search", blocked_domains: ["spam.example"] }],
+      tool_choice: { type: "tool", name: "web_search" },
+    },
+    "https://api.openai.com/v1",
+  );
+  assert.deepEqual(only.tools, [{ type: "web_search", filters: { excluded_domains: ["spam.example"] } }]);
+  assert.equal(only.tool_choice, "required");
+  const custom = messagesToResponses(
+    {
+      model: "grok-4.7",
+      tools: [{ type: "custom", name: "web_search", description: "mine", input_schema: { type: "object" } }],
+      tool_choice: { type: "tool", name: "web_search" },
+    },
+    "https://api.x.ai/v1",
+  );
+  assert.equal((custom.tools as { type: string }[])[0].type, "function");
+  assert.deepEqual(custom.tool_choice, { type: "function", name: "web_search" });
+});
+
+test("upstreams without hosted search drop the tool and the dangling choice", () => {
+  const gone = messagesToResponses(
+    {
+      model: "grok-4.7",
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      tool_choice: { type: "tool", name: "web_search" },
+    },
+    "https://opencode.ai/zen/go/v1",
+  );
+  assert.equal(gone.tools, undefined);
+  assert.equal(gone.tool_choice, undefined);
+  const chat = messagesToChat({
+    model: "kimi-k3",
+    tool_choice: { type: "any" },
+    tools: [{ type: "web_search_20250305", name: "web_search" }],
+  });
+  assert.equal(chat.tools, undefined);
+  assert.equal(chat.tool_choice, undefined);
+  const mixed = messagesToResponses(
+    {
+      model: "grok-4.7",
+      tools: [
+        { name: "bash", description: "run", input_schema: { type: "object" } },
+        { type: "web_search_20250305", name: "web_search" },
+      ],
+      tool_choice: { type: "tool", name: "web_search" },
+    },
+    "https://opencode.ai/zen/go/v1",
+  );
+  assert.equal((mixed.tools as unknown[]).length, 1);
+  assert.equal(mixed.tool_choice, "auto");
 });
 
 test("messagesToResponses keeps tool calls as response items", () => {

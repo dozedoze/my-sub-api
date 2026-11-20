@@ -310,14 +310,13 @@ async function proxyAfterGate(
     for (let i = 0; i < ordered.length; i++) {
       const account = ordered[i];
       const bodyRec = payload != null && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
-      const wire: MessagesWire | null = rest === "messages" && bodyRec ? messagesWire(account.baseUrl, picked.model) : null;
+      const wire: MessagesWire | null =
+        rest === "messages" && bodyRec ? messagesWire(account.baseUrl, picked.model, account.messages) : null;
       const target = wire ? messagesTarget(account.baseUrl, wire) : null;
       let outbound: unknown = payload;
       if (wire === "chat" && bodyRec) outbound = messagesToChat(bodyRec, chatToolChoiceAny(account.baseUrl));
-      else if (wire === "responses" && bodyRec) outbound = messagesToResponses(bodyRec);
-      else if (wire === "anthropic" && bodyRec && target && target.baseUrl !== account.baseUrl) {
-        outbound = prepareAnthropic(account.baseUrl, bodyRec);
-      }
+      else if (wire === "responses" && bodyRec) outbound = messagesToResponses(bodyRec, account.baseUrl, account.hostedSearch);
+      else if (wire === "anthropic" && bodyRec) outbound = prepareAnthropic(account.baseUrl, bodyRec);
       const upstreamBase = target?.baseUrl ?? account.baseUrl;
       const upstreamRest = target?.rest ?? rest;
       const headers = new Headers();

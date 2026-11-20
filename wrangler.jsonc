@@ -47,6 +47,7 @@
     ],
     // 模型别名，例如 {"gpt-4":"opencode/gpt-5.4","composer":"cursor/composer-2.5"}
     "MODEL_ALIASES": {},
+    "GROK_TEAM_ID": "04ce931d-cf40-4390-b22c-8a0181e52665",
     // 签发使用者 Key 时的默认 token 额度，0 表示不限额
     "DEFAULT_QUOTA_TOKENS": "10000000"
   },

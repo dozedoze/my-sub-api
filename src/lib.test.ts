@@ -7,10 +7,17 @@ import {
   adminSessionSetCookie,
   applyChatSseLine,
   assistantFromChatCompletion,
+  applyAdmit,
+  applyRelease,
   attachUsage,
+  bodyTooLarge,
+  chargeEstimate,
+  clampGeneration,
+  clientIp,
   defaultQuotaTokens,
   estimateTokens,
   effectiveQuota,
+  GATE,
   joinUrl,
   keyPrefix,
   looksLikeFullHistory,
@@ -760,6 +767,66 @@ test("admin session cookie is signed, expiring, not the raw token", async () => 
   assert.equal(adminSessionSetCookie(value, "http://127.0.0.1:8787/admin").includes("Secure"), false);
   assert.match(adminSessionClearCookie("https://aofahub.dev/admin"), /Max-Age=0/);
   assert.equal(readCookie(`a=1; ${ADMIN_SESSION_COOKIE}=${value}; b=2`, ADMIN_SESSION_COOKIE), value);
+});
+
+test("admit gate blocks rpm and inflight, not a few sequential calls", () => {
+  const empty = { used: 0, requests: 0 };
+  const now = 1_000_000;
+  const opts = { quota: 1000, maxRpm: 3, maxInflight: 2, takeInflight: true };
+  const a = applyAdmit(empty, now, opts);
+  assert.equal(a.ok, true);
+  if (!a.ok) return;
+  const b = applyAdmit(a.next, now + 10, opts);
+  assert.equal(b.ok, true);
+  if (!b.ok) return;
+  const full = applyAdmit(b.next, now + 20, opts);
+  assert.equal(full.ok, false);
+  if (full.ok) return;
+  assert.equal(full.code, "rate_limited");
+  assert.match(full.message, /concurrent/);
+
+  const rpmOpts = { quota: 0, maxRpm: 2, maxInflight: 99, takeInflight: false };
+  const r1 = applyAdmit(empty, now, rpmOpts);
+  assert.equal(r1.ok, true);
+  if (!r1.ok) return;
+  const r2 = applyAdmit(r1.next, now + 1, rpmOpts);
+  assert.equal(r2.ok, true);
+  if (!r2.ok) return;
+  const r3 = applyAdmit(r2.next, now + 2, rpmOpts);
+  assert.equal(r3.ok, false);
+  if (r3.ok) return;
+  assert.match(r3.message, /\/min/);
+  const r4 = applyAdmit(r2.next, now + GATE.windowMs, rpmOpts);
+  assert.equal(r4.ok, true);
+
+  const over = applyAdmit({ used: 100, requests: 1 }, now, { ...opts, quota: 100, takeInflight: false });
+  assert.equal(over.ok, false);
+  if (over.ok) return;
+  assert.equal(over.code, "insufficient_quota");
+
+  const stale = applyRelease({ used: 0, requests: 0, inflight: 9, gateAt: now - GATE.staleMs - 1 }, now);
+  assert.equal(stale.inflight, 0);
+});
+
+test("generation clamp, image floor, body cap, client ip", () => {
+  const body = { max_tokens: 200_000, n: 12, max_output_tokens: 200_000 };
+  clampGeneration(body);
+  assert.equal(body.max_tokens, GATE.maxTokens);
+  assert.equal(body.n, GATE.maxN);
+  assert.equal(body.max_output_tokens, GATE.maxTokens);
+  const small = { max_tokens: 1024, n: 1 };
+  clampGeneration(small);
+  assert.equal(small.max_tokens, 1024);
+  assert.equal(chargeEstimate("images/generations", { prompt: "hi" }) >= GATE.imageTokenFloor, true);
+  assert.equal(chargeEstimate("chat/completions", { prompt: "hi" }) < GATE.imageTokenFloor, true);
+  const big = new Request("https://x/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-length": String(GATE.maxBodyBytes + 1) },
+  });
+  assert.equal(bodyTooLarge(big, undefined), true);
+  assert.equal(bodyTooLarge(new Request("https://x"), { a: 1 }), false);
+  assert.equal(clientIp(new Request("https://x", { headers: { "cf-connecting-ip": "1.2.3.4" } })), "1.2.3.4");
+  assert.equal(clientIp(new Request("https://x")), "local");
 });
 
 test("admin shell paths are not API", () => {

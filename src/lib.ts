@@ -77,7 +77,103 @@ export type Meter = {
   requests: number;
   /** 下游这次转发的模型和 token，最新在前，最多 10 条。内部分档计费不写这里。 */
   recent?: RecentCall[];
+  /** 当前分钟窗口起点。限流字段，后台用量不展示。 */
+  rpmAt?: number;
+  rpm?: number;
+  inflight?: number;
+  gateAt?: number;
 };
+
+/** 给自己几个人用：挡住脚本刷，不挡 Cursor / Claude Code 多窗口连打。 */
+export const GATE = {
+  windowMs: 60_000,
+  staleMs: 10 * 60_000,
+  keyRpm: 480,
+  keyInflight: 32,
+  anonRpm: 60,
+  /** 只拦没登录成功的撞库，登录后不限。 */
+  adminRpm: 40,
+  maxBodyBytes: 8_000_000,
+  maxTokens: 131_072,
+  maxN: 4,
+  imageTokenFloor: 8_000,
+} as const;
+
+export type AdmitFail = { ok: false; status: number; code: string; message: string };
+export type AdmitHit = { ok: true; next: Meter } | AdmitFail;
+
+export function applyAdmit(
+  cur: Meter,
+  now: number,
+  opts: { quota: number; maxRpm: number; maxInflight: number; takeInflight: boolean },
+): AdmitHit {
+  let inflight = cur.inflight ?? 0;
+  if (inflight > 0 && now - (cur.gateAt ?? 0) > GATE.staleMs) inflight = 0;
+  let rpmAt = cur.rpmAt ?? now;
+  let rpm = cur.rpm ?? 0;
+  if (now - rpmAt >= GATE.windowMs) {
+    rpmAt = now;
+    rpm = 0;
+  }
+  if (opts.quota > 0 && cur.used >= opts.quota) {
+    return {
+      ok: false,
+      status: 429,
+      code: "insufficient_quota",
+      message: `Token quota exceeded (${cur.used}/${opts.quota})`,
+    };
+  }
+  if (rpm >= opts.maxRpm) {
+    return { ok: false, status: 429, code: "rate_limited", message: `Too many requests (${opts.maxRpm}/min)` };
+  }
+  if (opts.takeInflight && inflight >= opts.maxInflight) {
+    return {
+      ok: false,
+      status: 429,
+      code: "rate_limited",
+      message: `Too many concurrent requests (${opts.maxInflight})`,
+    };
+  }
+  return {
+    ok: true,
+    next: {
+      ...cur,
+      rpmAt,
+      rpm: rpm + 1,
+      inflight: opts.takeInflight ? inflight + 1 : inflight,
+      gateAt: now,
+    },
+  };
+}
+
+export function applyRelease(cur: Meter, now: number): Meter {
+  let inflight = cur.inflight ?? 0;
+  if (inflight > 0 && now - (cur.gateAt ?? 0) > GATE.staleMs) inflight = 0;
+  return { ...cur, inflight: Math.max(0, inflight - 1), gateAt: now };
+}
+
+export function clientIp(request: Request): string {
+  return request.headers.get("cf-connecting-ip")?.trim() || "local";
+}
+
+export function clampGeneration(payload: unknown): void {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+  const p = payload as Record<string, unknown>;
+  for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"]) {
+    const n = p[key];
+    if (typeof n === "number" && Number.isFinite(n) && n > GATE.maxTokens) p[key] = GATE.maxTokens;
+  }
+  if (typeof p.n === "number" && Number.isFinite(p.n) && p.n > GATE.maxN) p.n = GATE.maxN;
+}
+
+export function chargeEstimate(rest: string, payload: unknown): number {
+  const n = estimateTokens(payload);
+  return rest.startsWith("images/") ? Math.max(n, GATE.imageTokenFloor) : n;
+}
+
+export function throwIfAdmitFailed(hit: { ok: true } | AdmitFail): asserts hit is { ok: true } {
+  if (!hit.ok) throw new GatewayError(hit.status, hit.code, hit.message);
+}
 
 export const RECENT_CALL_LIMIT = 10;
 
@@ -552,6 +648,17 @@ export function tokensFromUsage(json: unknown): number | null {
 
 export function estimateTokens(payload: unknown): number {
   return Math.max(1, Math.ceil(JSON.stringify(payload ?? "").length / 4));
+}
+
+export function bodyTooLarge(request: Request, payload: unknown): boolean {
+  const len = Number(request.headers.get("content-length"));
+  if (Number.isFinite(len) && len > GATE.maxBodyBytes) return true;
+  if (payload === undefined) return false;
+  try {
+    return JSON.stringify(payload ?? "").length > GATE.maxBodyBytes;
+  } catch {
+    return true;
+  }
 }
 
 export type UpstreamWindow = {

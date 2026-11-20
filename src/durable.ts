@@ -1,5 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
-import { pushRecent, trimSessionMessages, type ChatMessage, type Meter } from "./lib";
+import {
+  applyAdmit,
+  applyRelease,
+  pushRecent,
+  trimSessionMessages,
+  type AdmitFail,
+  type ChatMessage,
+  type Meter,
+} from "./lib";
+
+function meterName(id: string): string {
+  return id.startsWith("anon:") || id.startsWith("admin:") ? `g:${id}` : `k:${id}`;
+}
 
 export class ChatSession extends DurableObject<Env> {
   async load(): Promise<ChatMessage[]> {
@@ -41,13 +53,36 @@ export class QuotaBoard extends DurableObject<Env> {
   }
 
   async peek(keyId: string): Promise<Meter> {
-    return (await this.ctx.storage.get<Meter>(`k:${keyId}`)) ?? { used: 0, requests: 0 };
+    return (await this.ctx.storage.get<Meter>(meterName(keyId))) ?? { used: 0, requests: 0 };
+  }
+
+  async admit(
+    id: string,
+    opts: { quota: number; maxRpm: number; maxInflight: number; takeInflight: boolean },
+  ): Promise<{ ok: true } | AdmitFail> {
+    const cur = await this.peek(id);
+    const hit = applyAdmit(cur, Date.now(), opts);
+    if (!hit.ok) return hit;
+    await this.ctx.storage.put(meterName(id), hit.next);
+    return { ok: true };
+  }
+
+  async release(id: string): Promise<void> {
+    const cur = await this.peek(id);
+    await this.ctx.storage.put(meterName(id), applyRelease(cur, Date.now()));
   }
 
   async add(keyId: string, providerId: string, tokens: number, model?: string): Promise<Meter> {
     const n = Math.max(0, Math.floor(tokens));
     const cur = await this.peek(keyId);
-    const next: Meter = { used: cur.used + n, requests: cur.requests + 1 };
+    const next: Meter = {
+      used: cur.used + n,
+      requests: cur.requests + 1,
+      rpmAt: cur.rpmAt,
+      rpm: cur.rpm,
+      inflight: cur.inflight,
+      gateAt: cur.gateAt,
+    };
     // model 缺省是内部分档计费：只累加额度，最近调用原样保留。
     if (model !== undefined) {
       next.recent = pushRecent(cur.recent, { at: Date.now(), model, provider: providerId, tokens: n });

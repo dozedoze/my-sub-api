@@ -20,7 +20,11 @@ import {
   applyUpstreamSticky,
   assistantFromChatCompletion,
   anthropicModelCard,
+  bodyTooLarge,
+  chargeEstimate,
+  clampGeneration,
   claudeDiscoveryModels,
+  clientIp,
   corsHeaders,
   defaultQuotaTokens,
   effectiveQuota,
@@ -30,6 +34,7 @@ import {
   matchListedModel,
   extractToken,
   failoverAction,
+  GATE,
   GatewayError,
   goAllowanceBlocks,
   isGoSubscription,
@@ -44,6 +49,7 @@ import {
   resolveSessionId,
   rotateFrom,
   stickyAccountId,
+  throwIfAdmitFailed,
   tokensFromUsage,
   vendorGroups,
   vendorPeers,
@@ -71,10 +77,32 @@ const HOP = new Set([
 ]);
 
 export async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: string): Promise<Response> {
+  const board = quotaBoard(env);
+  const ip = clientIp(request);
   const token = extractToken(request);
-  if (!token) throw new GatewayError(401, "invalid_api_key", "Missing API key");
+  if (!token) {
+    throwIfAdmitFailed(
+      await board.admit(`anon:${ip}`, {
+        quota: 0,
+        maxRpm: GATE.anonRpm,
+        maxInflight: GATE.keyInflight,
+        takeInflight: false,
+      }),
+    );
+    throw new GatewayError(401, "invalid_api_key", "Missing API key");
+  }
   const issued = await lookupByPlaintext(env.KEYS, token);
-  if (!issued) throw new GatewayError(401, "invalid_api_key", "Invalid API key");
+  if (!issued) {
+    throwIfAdmitFailed(
+      await board.admit(`anon:${ip}`, {
+        quota: 0,
+        maxRpm: GATE.anonRpm,
+        maxInflight: GATE.keyInflight,
+        takeInflight: false,
+      }),
+    );
+    throw new GatewayError(401, "invalid_api_key", "Invalid API key");
+  }
 
   const { live } = loadProviders(env);
   const map = new Map(live.map((p) => [p.id, p]));
@@ -83,6 +111,60 @@ export async function proxy(request: Request, env: Env, ctx: ExecutionContext, r
   const aliases = parseJsonObject(env.MODEL_ALIASES);
   const autoRoute = picked.route;
   const defaultProvider = live[0]?.id ?? "";
+  const fallbackQuota = defaultQuotaTokens(env.DEFAULT_QUOTA_TOKENS);
+  const quota = effectiveQuota(issued, fallbackQuota);
+  throwIfAdmitFailed(
+    await board.admit(issued.id, {
+      quota: request.method === "GET" ? 0 : quota,
+      maxRpm: GATE.keyRpm,
+      maxInflight: GATE.keyInflight,
+      takeInflight: true,
+    }),
+  );
+  const hold = { inflight: true };
+  try {
+    return await proxyAfterGate(request, env, ctx, rest, {
+      issued,
+      live,
+      map,
+      blocked,
+      aliases,
+      autoRoute,
+      defaultProvider,
+      board,
+      hold,
+    });
+  } finally {
+    if (hold.inflight) {
+      try {
+        await board.release(issued.id);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+type Issued = Awaited<ReturnType<typeof lookupByPlaintext>>;
+
+async function proxyAfterGate(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  rest: string,
+  ctxp: {
+    issued: NonNullable<Issued>;
+    live: Provider[];
+    map: Map<string, Provider>;
+    blocked: Set<string>;
+    aliases: Record<string, string>;
+    autoRoute: Awaited<ReturnType<typeof currentAuto>>["route"];
+    defaultProvider: string;
+    board: DurableObjectStub<QuotaBoard>;
+    hold: { inflight: boolean };
+  },
+): Promise<Response> {
+  const { issued, live, map, blocked, aliases, autoRoute, defaultProvider, board, hold } = ctxp;
 
   if ((rest === "models" || rest.startsWith("models/")) && request.method === "GET") {
     if (issued.provider && blocked.has(issued.provider)) {
@@ -101,10 +183,17 @@ export async function proxy(request: Request, env: Env, ctx: ExecutionContext, r
     if (!ct.includes("application/json")) {
       throw new GatewayError(400, "invalid_request", "Content-Type must be application/json");
     }
+    if (bodyTooLarge(request, undefined)) {
+      throw new GatewayError(413, "invalid_request", "Request body too large");
+    }
     payload = await request.json().catch(() => null);
     if (!payload || typeof payload !== "object") {
       throw new GatewayError(400, "invalid_request", "Invalid JSON body");
     }
+    if (bodyTooLarge(request, payload)) {
+      throw new GatewayError(413, "invalid_request", "Request body too large");
+    }
+    clampGeneration(payload);
     if ("model" in payload && typeof payload.model === "string") model = payload.model;
   }
   if (rest === "messages/count_tokens") {
@@ -137,21 +226,6 @@ export async function proxy(request: Request, env: Env, ctx: ExecutionContext, r
       : mergeSessionMessages(await sessionStub.load(), incoming);
     (payload as { messages: ChatMessage[] }).messages = merged;
     forwardedMessages = merged;
-  }
-
-  const fallbackQuota = defaultQuotaTokens(env.DEFAULT_QUOTA_TOKENS);
-  const quota = effectiveQuota(issued, fallbackQuota);
-  const board = quotaBoard(env);
-  if (request.method !== "GET") {
-    // ponytail: 先 peek 再打上游，并发最后几下可能略超额度。要卡死就改成 DO 里 reserve。
-    const meter = await board.peek(issued.id);
-    if (quota > 0 && meter.used >= quota) {
-      throw new GatewayError(
-        429,
-        "insufficient_quota",
-        `Token quota exceeded (${meter.used}/${quota})`,
-      );
-    }
   }
 
   let autoTierName: "easy" | "hard" | undefined;
@@ -340,17 +414,18 @@ export async function proxy(request: Request, env: Env, ctx: ExecutionContext, r
       if (autoTierName === "hard" && sessionStub && spec && upstream.status < 400 && spec !== pinnedHard) {
         await sessionStub.saveAutoModel(spec);
       }
-      const handed = {
+      const handed: Handed = {
         sessionId,
         sessionStub,
         autoTier: autoTierName,
         prior: forwardedMessages,
+        hold,
         meter: {
           board,
           keyId: issued.id,
           providerId: account.id,
           model: picked.model,
-          estimate: estimateTokens(payload ?? rest),
+          estimate: chargeEstimate(rest, payload ?? rest),
         },
       };
       if (wire === "chat" || wire === "responses") return anthropicFromChat(upstream, ctx, handed, wire);
@@ -393,6 +468,7 @@ type Handed = {
   sessionStub?: DurableObjectStub<ChatSession>;
   autoTier?: "easy" | "hard";
   prior?: ChatMessage[];
+  hold: { inflight: boolean };
   meter: {
     board: DurableObjectStub<QuotaBoard>;
     keyId: string;
@@ -446,7 +522,8 @@ async function anthropicFromChat(
   const ct = upstream.headers.get("content-type") || "";
   if (ct.includes("text/event-stream")) {
     const [toClient, toParse] = upstream.body.tee();
-    ctx.waitUntil(consumeSse(toParse, session.sessionStub, session.prior, session.meter));
+    session.hold.inflight = false;
+    ctx.waitUntil(consumeSse(toParse, session.sessionStub, session.prior, session.meter, true));
     headers.set("content-type", "text/event-stream; charset=utf-8");
     headers.set("cache-control", "no-cache");
     return new Response((wire === "responses" ? responsesSseToAnthropic : chatSseToAnthropic)(toClient, session.meter.model), {
@@ -493,7 +570,8 @@ async function passthrough(upstream: Response, ctx: ExecutionContext, session: H
 
   if (ct.includes("text/event-stream")) {
     const [toClient, toParse] = upstream.body.tee();
-    ctx.waitUntil(consumeSse(toParse, stub, prior, meter));
+    session.hold.inflight = false;
+    ctx.waitUntil(consumeSse(toParse, stub, prior, meter, true));
     return new Response(toClient, { status: upstream.status, statusText: upstream.statusText, headers });
   }
 
@@ -505,6 +583,7 @@ async function consumeSse(
   stub: DurableObjectStub<ChatSession> | undefined,
   prior: ChatMessage[] | undefined,
   meter: { board: DurableObjectStub<QuotaBoard>; keyId: string; providerId: string; model: string; estimate: number },
+  release: boolean,
 ): Promise<void> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -525,6 +604,19 @@ async function consumeSse(
     await meter.board.add(meter.keyId, meter.providerId, tokens, meter.model);
   } catch (err) {
     console.error(JSON.stringify({ message: "session_sse_save", error: err instanceof Error ? err.message : String(err) }));
+    try {
+      await meter.board.add(meter.keyId, meter.providerId, meter.estimate, meter.model);
+    } catch {
+      /* ignore meter failure */
+    }
+  } finally {
+    if (release) {
+      try {
+        await meter.board.release(meter.keyId);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 }
 

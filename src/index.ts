@@ -1,14 +1,18 @@
 import { adminHtml } from "./admin-ui";
 import { adminApi, requireAdmin } from "./admin-api";
 import faviconSvg from "./admin/favicon.svg";
+import { quotaBoard } from "./durable";
 import {
   adminSessionClearCookie,
   adminSessionSetCookie,
+  clientIp,
   corsHeaders,
+  GATE,
   GatewayError,
   isAdminShellPath,
   mintAdminSession,
   openaiError,
+  throwIfAdmitFailed,
   upstreamRestPath,
 } from "./lib";
 import { proxy } from "./proxy";
@@ -58,7 +62,22 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         },
       });
     }
-    const viaBearer = await requireAdmin(request, env);
+    let viaBearer: boolean;
+    try {
+      viaBearer = await requireAdmin(request, env);
+    } catch (err) {
+      if (err instanceof GatewayError && err.status === 401) {
+        throwIfAdmitFailed(
+          await quotaBoard(env).admit(`admin:${clientIp(request)}`, {
+            quota: 0,
+            maxRpm: GATE.adminRpm,
+            maxInflight: GATE.keyInflight,
+            takeInflight: false,
+          }),
+        );
+      }
+      throw err;
+    }
     const res = await adminApi(request, env, path);
     if (!viaBearer) return res;
     const headers = new Headers(res.headers);

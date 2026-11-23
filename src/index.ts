@@ -50,7 +50,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     });
   }
   if (request.method === "GET" && path === "/") {
-    return new Response(landing(url.origin), { headers: { "content-type": "text/html; charset=utf-8" } });
+    return Response.redirect(new URL("/admin", url.origin).href, 302);
   }
   if (path.startsWith("/admin/api")) {
     if (request.method === "POST" && path === "/admin/api/logout") {
@@ -96,12 +96,3 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   return proxy(request, env, ctx, rest);
 }
 
-function landing(origin: string): string {
-  return `<!DOCTYPE html><meta charset="utf-8"><title>API 分发</title>
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<body style="font:16px/1.5 system-ui;background:#0b0d12;color:#e8edf7;padding:48px">
-<h1>API 分发</h1>
-<p>OpenAI 兼容 API。使用者 Base URL：<code>${origin}/v1</code></p>
-<p><a href="/admin" style="color:#6ee7b7">管理后台</a>（签发分发账号）</p>
-</body>`;
-}

@@ -301,6 +301,16 @@ test("server tools survive only on an upstream that can run them", () => {
   assert.equal((official.tools as unknown[]).length, body.tools.length);
   assert.deepEqual(official.tool_choice, body.tool_choice);
 
+  const dsSearch = prepareAnthropic("https://api.deepseek.com/v1", {
+    model: "deepseek-flash",
+    tools: [
+      { type: "deepseek_web_search", name: "deepseek_web_search" },
+      { type: "deepseek_read_url", name: "deepseek_read_url" },
+      { name: "Bash", description: "run", input_schema: { type: "object" } },
+    ],
+  });
+  assert.deepEqual(names(dsSearch.tools), ["deepseek_web_search", "deepseek_read_url", "Bash"]);
+
   const fetchOnly = {
     model: "m",
     tools: [{ type: "web_fetch_20250910", name: "web_fetch" }],

@@ -59,6 +59,9 @@ export type KeyRecord = {
   provider?: string;
   /** 0 = 不限额。缺省字段按 DEFAULT_QUOTA_TOKENS 处理。 */
   quotaTokens?: number;
+  username?: string;
+  passwordSalt?: string;
+  passwordHash?: string;
 };
 
 export type KeyPublic = {
@@ -69,6 +72,7 @@ export type KeyPublic = {
   createdAt: number;
   provider?: string;
   quotaTokens?: number;
+  username?: string;
 };
 
 export type RecentCall = {
@@ -100,6 +104,7 @@ export const GATE = {
   /** 只拦没登录成功的撞库，登录后不限。 */
   adminRpm: 40,
   maxBodyBytes: 8_000_000,
+  maxFileBytes: 32_000_000,
   maxTokens: 131_072,
   maxN: 4,
   imageTokenFloor: 8_000,
@@ -229,6 +234,32 @@ const PROXY_PATHS = new Set([
   "images/edits",
 ]);
 
+const SKILL_RESTS = new Set(["messages", "chat/completions", "responses"]);
+
+export type ProxyRoute = { rest: string; skills: boolean };
+
+function dropAnthropicPrefix(pathname: string): string {
+  if (pathname === "/anthropic") return "/";
+  if (pathname.startsWith("/anthropic/")) return pathname.slice("/anthropic".length) || "/";
+  return pathname;
+}
+
+export function proxyRoute(pathname: string): ProxyRoute | null {
+  let path = dropAnthropicPrefix(pathname.replace(/\/+$/, "") || "/");
+  if (path === "/models" || path.startsWith("/models/")) return { rest: path.slice(1), skills: false };
+  const stripped = stripV1(path).replace(/^\//, "");
+  if (stripped.startsWith("skill/")) {
+    const rest = stripped.slice("skill/".length);
+    if (SKILL_RESTS.has(rest)) return { rest, skills: true };
+    return null;
+  }
+  if (PROXY_PATHS.has(stripped)) return { rest: stripped, skills: false };
+  if (stripped.startsWith("models/") && stripped.length > "models/".length) return { rest: stripped, skills: false };
+  if (stripped === "files" || stripped.startsWith("files/")) return { rest: stripped, skills: false };
+  if (stripped === "tools/asr" || stripped === "tools/tts") return { rest: stripped, skills: false };
+  return null;
+}
+
 export function joinUrl(base: string, path: string): string {
   const b = base.replace(/\/+$/, "");
   const p = path.replace(/^\/+/, "");
@@ -240,10 +271,7 @@ export function stripV1(pathname: string): string {
 }
 
 export function upstreamRestPath(pathname: string): string | null {
-  const rest = stripV1(pathname).replace(/^\//, "");
-  if (PROXY_PATHS.has(rest)) return rest;
-  if (rest.startsWith("models/") && rest.length > "models/".length) return rest;
-  return null;
+  return proxyRoute(pathname)?.rest ?? null;
 }
 
 /** wrangler vars 可以是 JSON 绑定，也可以是旧的 JSON 字符串。 */
@@ -510,6 +538,9 @@ export function extractToken(request: Request): string | null {
 
 export const ADMIN_SESSION_COOKIE = "admin_session";
 export const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const CHAT_SESSION_COOKIE = "chat_session";
+export const CHAT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const PBKDF2_ITERATIONS = 100_000;
 
 async function hmacHex(secret: string, msg: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -570,6 +601,106 @@ export function adminSessionClearCookie(requestUrl: string): string {
   return adminSessionSetCookie("deleted", requestUrl, 0);
 }
 
+function chatCookieDomain(requestUrl: string): string | undefined {
+  const host = new URL(requestUrl).hostname.toLowerCase();
+  if (host === "aofahub.dev" || host.endsWith(".aofahub.dev")) return ".aofahub.dev";
+  return undefined;
+}
+
+export async function mintChatSession(secret: string, keyId: string, now = Date.now()): Promise<string> {
+  const exp = Math.floor((now + CHAT_SESSION_TTL_MS) / 1000);
+  const sig = await hmacHex(secret, `chat-session:v1:${keyId}:${exp}`);
+  return `${keyId}.${exp}.${sig}`;
+}
+
+export async function verifyChatSession(secret: string, value: string, now = Date.now()): Promise<string | null> {
+  const parts = value.split(".");
+  if (parts.length !== 3) return null;
+  const [keyId, expStr, sig] = parts;
+  if (!/^[0-9a-f-]{36}$/i.test(keyId) || !/^[0-9]{1,12}$/.test(expStr) || !/^[0-9a-f]{64}$/.test(sig)) return null;
+  const exp = Number(expStr);
+  const nowSec = Math.floor(now / 1000);
+  if (exp <= nowSec) return null;
+  if (exp > nowSec + CHAT_SESSION_TTL_MS / 1000 + 60) return null;
+  const expect = await hmacHex(secret, `chat-session:v1:${keyId}:${exp}`);
+  if (!(await timingSafeEqualString(sig, expect))) return null;
+  return keyId;
+}
+
+export function chatSessionSetCookie(value: string, requestUrl: string, maxAgeSec = CHAT_SESSION_TTL_MS / 1000): string {
+  const secure = new URL(requestUrl).protocol === "https:";
+  const domain = chatCookieDomain(requestUrl);
+  return [
+    `${CHAT_SESSION_COOKIE}=${value}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${Math.floor(maxAgeSec)}`,
+    ...(domain ? [`Domain=${domain}`] : []),
+    ...(secure ? ["Secure"] : []),
+  ].join("; ");
+}
+
+export function chatSessionClearCookie(requestUrl: string): string {
+  return chatSessionSetCookie("deleted", requestUrl, 0);
+}
+
+export function isChatOrigin(origin: string): boolean {
+  if (origin === "https://chat.aofahub.dev") return true;
+  try {
+    const u = new URL(origin);
+    return (u.protocol === "http:" || u.protocol === "https:") && (u.hostname === "localhost" || u.hostname === "127.0.0.1");
+  } catch {
+    return false;
+  }
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+export function generatePassword(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  let out = "";
+  for (const b of bytes) out += alphabet[b % alphabet.length];
+  return out;
+}
+
+export function parseUsername(raw: unknown): string | undefined {
+  if (raw == null || raw === "") return undefined;
+  if (typeof raw !== "string") throw new GatewayError(400, "invalid_request", "username must be a string");
+  const u = raw.trim().toLowerCase();
+  if (!u) return undefined;
+  if (!/^[a-z0-9._-]{2,32}$/.test(u)) {
+    throw new GatewayError(400, "invalid_request", "username must be 2-32 letters, digits, dot, underscore or hyphen");
+  }
+  return u;
+}
+
+export async function hashPassword(password: string, saltHex?: string): Promise<{ salt: string; hash: string }> {
+  const salt = saltHex ? hexToBytes(saltHex) : crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations: PBKDF2_ITERATIONS },
+    key,
+    256,
+  );
+  return { salt: bytesToHex(salt), hash: bytesToHex(new Uint8Array(bits)) };
+}
+
+export async function verifyPassword(password: string, salt: string, hash: string): Promise<boolean> {
+  if (!/^[0-9a-f]+$/i.test(salt) || !/^[0-9a-f]+$/i.test(hash) || salt.length % 2 || hash.length % 2) return false;
+  const got = await hashPassword(password, salt);
+  return timingSafeEqualString(got.hash, hash);
+}
+
 /** GET 后台页。`/admin/api` 是接口，不走这里。 */
 export function isAdminShellPath(path: string): boolean {
   return path === "/admin" || (path.startsWith("/admin/") && !path.startsWith("/admin/api"));
@@ -601,6 +732,7 @@ export function toPublicKey(record: KeyRecord): KeyPublic {
     createdAt: record.createdAt,
     provider: record.provider,
     quotaTokens: record.quotaTokens,
+    ...(record.username ? { username: record.username } : {}),
   };
 }
 
@@ -664,12 +796,12 @@ export function estimateTokens(payload: unknown): number {
   return Math.max(1, Math.ceil(JSON.stringify(payload ?? "").length / 4));
 }
 
-export function bodyTooLarge(request: Request, payload: unknown): boolean {
+export function bodyTooLarge(request: Request, payload: unknown, max: number = GATE.maxBodyBytes): boolean {
   const len = Number(request.headers.get("content-length"));
-  if (Number.isFinite(len) && len > GATE.maxBodyBytes) return true;
+  if (Number.isFinite(len) && len > max) return true;
   if (payload === undefined) return false;
   try {
-    return JSON.stringify(payload ?? "").length > GATE.maxBodyBytes;
+    return JSON.stringify(payload ?? "").length > max;
   } catch {
     return true;
   }
@@ -1014,19 +1146,22 @@ export async function timingSafeEqualString(a: string, b: string): Promise<boole
   return sameBytes && aa.length === bb.length;
 }
 
-export function openaiError(status: number, code: string, message: string): Response {
+export function openaiError(status: number, code: string, message: string, request?: Request): Response {
   return Response.json(
     { error: { message, type: status === 401 ? "invalid_request_error" : "api_error", code } },
-    { status, headers: corsHeaders() },
+    { status, headers: corsHeaders(request) },
   );
 }
 
-export function corsHeaders(): HeadersInit {
+export function corsHeaders(request?: Request): HeadersInit {
+  const origin = request?.headers.get("origin")?.trim() || "";
+  const cred = origin !== "" && isChatOrigin(origin);
   return {
-    "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+    "access-control-allow-origin": cred ? origin : "*",
+    ...(cred ? { "access-control-allow-credentials": "true", vary: "Origin" } : {}),
+    "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
     "access-control-allow-headers":
-      "Authorization, Content-Type, x-api-key, api-key, anthropic-version, openai-beta, x-stainless-timeout, x-session-id, x-conversation-id, x-opencode-session, x-grok-conv-id",
+      "Authorization, Content-Type, x-api-key, api-key, anthropic-version, anthropic-beta, openai-beta, x-stainless-timeout, x-session-id, x-conversation-id, x-opencode-session, x-grok-conv-id",
     "access-control-expose-headers": "x-session-id, x-opencode-session, x-auto-tier",
     "access-control-max-age": "86400",
   };

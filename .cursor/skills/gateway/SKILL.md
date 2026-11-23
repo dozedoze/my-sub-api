@@ -10,6 +10,12 @@ description: >-
 
 客户端和模型都不能假设。不要为 Grok、千问、DeepSeek 再加一条分支，除非这家上游的文档写明某种请求会 400，并且未知上游不走这条分支。
 
+## 托管 Skill
+
+通用 skill **只**挂在 `/v1/skill/*` 和 `/anthropic/v1/skill/*`。默认 `/v1/chat/completions`、`/v1/messages` 纯转发，不要往里面塞工具。
+
+启用列表在 KV（后台 `/admin/api/skills`），不要写进 `messagesWire` 的模型名前缀。Worker 自己执行 `web_search` / `fetch_url`。没有搜索 secret 就不挂 `web_search`。DeepSeek 请求里已有 `deepseek_web_search` / `deepseek_read_url` 时不重复挂。DeepSeek 会自己执行这两样，`prepareAnthropic` 要放行，别当未知服务端工具丢掉。
+
 ## 协议
 
 `/v1/messages` 的协议看上游配置 `messages`：`chat`、`responses`、`anthropic`。没写才按地址猜，猜不到就是 `chat`。

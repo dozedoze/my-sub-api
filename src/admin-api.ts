@@ -5,12 +5,18 @@ import {
   clearAutoModels,
   createIssuedKey,
   deleteIssuedKey,
+  HOSTED_SKILL_IDS,
   listIssuedKeys,
+  loadSkills,
   loadUpstreamBans,
+  parseSkillsConfig,
   patchIssuedKey,
+  resetIssuedPassword,
   saveAutoModels,
+  saveSkills,
   unbanUpstream,
 } from "./keys";
+import { searchConfigured } from "./skills";
 import {
   ADMIN_SESSION_COOKIE,
   attachUsage,
@@ -21,6 +27,7 @@ import {
   loadProviders,
   modelAllowed,
   parseQuotaInput,
+  parseUsername,
   readCookie,
   timingSafeEqualString,
   verifyAdminSession,
@@ -91,8 +98,11 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
         defaultQuotaTokens: fallbackQuota,
         auto: picked.route,
         autoSaved: picked.saved,
+        skills: await loadSkills(env.KEYS),
+        skillsCatalog: [...HOSTED_SKILL_IDS],
+        searchConfigured: searchConfigured(env),
       },
-      { headers: corsHeaders() },
+      { headers: corsHeaders(request) },
     );
   }
 
@@ -100,12 +110,18 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
     const meters = await board.snapshot();
     return Response.json(
       { keys: attachUsage(await listIssuedKeys(env.KEYS), meters.keys, fallbackQuota) },
-      { headers: corsHeaders() },
+      { headers: corsHeaders(request) },
     );
   }
 
   if (request.method === "POST" && path === "/admin/api/keys") {
-    const body = (await request.json().catch(() => ({}))) as { name?: string; provider?: string; quotaTokens?: unknown };
+    const body = (await request.json().catch(() => ({}))) as {
+      name?: string;
+      provider?: string;
+      quotaTokens?: unknown;
+      username?: unknown;
+      password?: unknown;
+    };
     const name = (body.name ?? "").trim();
     if (!name) throw new GatewayError(400, "invalid_request", "name is required");
     if (body.provider && !publicList.some((p) => p.id === body.provider && p.configured)) {
@@ -118,15 +134,30 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
       name,
       provider: body.provider,
       quotaTokens: parseQuotaInput(body.quotaTokens, fallbackQuota),
+      username: parseUsername(body.username),
+      password: typeof body.password === "string" ? body.password : undefined,
     });
-    return Response.json({ key: created.plaintext, ...created.record }, { headers: corsHeaders() });
+    return Response.json(
+      { key: created.plaintext, password: created.password, ...created.record },
+      { headers: corsHeaders(request) },
+    );
   }
 
   const one = path.match(/^\/admin\/api\/keys\/([^/]+)$/);
   if (one) {
     const id = decodeURIComponent(one[1]);
     if (request.method === "POST") {
-      const body = (await request.json().catch(() => ({}))) as { enabled?: boolean; quotaTokens?: unknown };
+      const body = (await request.json().catch(() => ({}))) as {
+        enabled?: boolean;
+        quotaTokens?: unknown;
+        resetPassword?: boolean;
+        password?: string;
+      };
+      if (body.resetPassword) {
+        const reset = await resetIssuedPassword(env.KEYS, id, typeof body.password === "string" ? body.password : undefined);
+        if (!reset) throw new GatewayError(404, "not_found", "Key not found");
+        return Response.json({ password: reset.password, ...reset.record }, { headers: corsHeaders(request) });
+      }
       const patch: { enabled?: boolean; quotaTokens?: number } = {};
       if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
       if (body.quotaTokens !== undefined) patch.quotaTokens = parseQuotaInput(body.quotaTokens, fallbackQuota);
@@ -135,13 +166,28 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
       }
       const rec = await patchIssuedKey(env.KEYS, id, patch);
       if (!rec) throw new GatewayError(404, "not_found", "Key not found");
-      return Response.json(rec, { headers: corsHeaders() });
+      return Response.json(rec, { headers: corsHeaders(request) });
     }
     if (request.method === "DELETE") {
       const ok = await deleteIssuedKey(env.KEYS, id);
       if (!ok) throw new GatewayError(404, "not_found", "Key not found");
       await board.reset(id);
-      return Response.json({ deleted: true }, { headers: corsHeaders() });
+      return Response.json({ deleted: true }, { headers: corsHeaders(request) });
+    }
+  }
+
+  if (path === "/admin/api/skills") {
+    if (request.method === "GET") {
+      return Response.json(
+        { ...await loadSkills(env.KEYS), catalog: [...HOSTED_SKILL_IDS], searchConfigured: searchConfigured(env) },
+        { headers: corsHeaders(request) },
+      );
+    }
+    if (request.method === "PUT" || request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      const config = parseSkillsConfig(body);
+      await saveSkills(env.KEYS, config);
+      return Response.json({ ...config, saved: true, searchConfigured: searchConfigured(env) }, { headers: corsHeaders(request) });
     }
   }
 
@@ -150,11 +196,11 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
       const body = await request.json().catch(() => null);
       const route = readAutoInput(body);
       await saveAutoModels(env.KEYS, route);
-      return Response.json({ ...route, saved: true }, { headers: corsHeaders() });
+      return Response.json({ ...route, saved: true }, { headers: corsHeaders(request) });
     }
     if (request.method === "DELETE") {
       await clearAutoModels(env.KEYS);
-      return Response.json({ saved: false }, { headers: corsHeaders() });
+      return Response.json({ saved: false }, { headers: corsHeaders(request) });
     }
   }
 
@@ -167,11 +213,11 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
     if (request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as { reason?: string };
       const hit = await banUpstream(env.KEYS, id, typeof body.reason === "string" ? body.reason : "manual", false);
-      return Response.json(hit, { headers: corsHeaders() });
+      return Response.json(hit, { headers: corsHeaders(request) });
     }
     if (request.method === "DELETE") {
       await unbanUpstream(env.KEYS, id);
-      return Response.json({ deleted: true }, { headers: corsHeaders() });
+      return Response.json({ deleted: true }, { headers: corsHeaders(request) });
     }
   }
 

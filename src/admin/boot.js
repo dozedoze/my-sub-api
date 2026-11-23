@@ -1,7 +1,7 @@
-const PAGES = ["keys", "upstream", "guide"];
-const PAGE_TITLE = { keys: "分发账号管理", upstream: "上游账号", guide: "接入指南" };
+const PAGES = ["keys", "upstream", "skills", "guide"];
+const PAGE_TITLE = { keys: "分发账号管理", upstream: "上游账号", skills: "通用 Skill", guide: "接入指南" };
 const PAGE_FROM_SLUG = {
-  keys: "keys", upstream: "upstream", guide: "guide",
+  keys: "keys", upstream: "upstream", skills: "skills", guide: "guide",
   密钥: "keys", 上游: "upstream", 接入: "guide",
 };
 
@@ -69,6 +69,7 @@ async function enter(status, afterLogin) {
   show(document.getElementById("shell"), true);
   showPage(afterLogin ? "keys" : currentPage(), true);
   renderStatus(status);
+  fillSkills(status);
   await reload();
 }
 

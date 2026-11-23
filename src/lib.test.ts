@@ -61,6 +61,15 @@ import {
   readRecent,
   trimSessionMessages,
   upstreamRestPath,
+  proxyRoute,
+  parseUsername,
+  generatePassword,
+  hashPassword,
+  verifyPassword,
+  mintChatSession,
+  verifyChatSession,
+  isChatOrigin,
+  corsHeaders,
   vendorGroups,
   vendorPeers,
   type Provider,
@@ -97,6 +106,15 @@ test("joinUrl and v1 stripping", () => {
   assert.equal(upstreamRestPath("/v1/models/opencode/qwen4-max"), "models/opencode/qwen4-max");
   assert.equal(upstreamRestPath("/v1/messages/count_tokens"), "messages/count_tokens");
   assert.equal(upstreamRestPath("/v1/admin"), null);
+  assert.deepEqual(proxyRoute("/v1/chat/completions"), { rest: "chat/completions", skills: false });
+  assert.deepEqual(proxyRoute("/anthropic/v1/messages"), { rest: "messages", skills: false });
+  assert.deepEqual(proxyRoute("/v1/skill/messages"), { rest: "messages", skills: true });
+  assert.deepEqual(proxyRoute("/anthropic/v1/skill/messages"), { rest: "messages", skills: true });
+  assert.deepEqual(proxyRoute("/v1/skill/chat/completions"), { rest: "chat/completions", skills: true });
+  assert.deepEqual(proxyRoute("/models"), { rest: "models", skills: false });
+  assert.deepEqual(proxyRoute("/anthropic/v1/files"), { rest: "files", skills: false });
+  assert.deepEqual(proxyRoute("/v1/tools/asr"), { rest: "tools/asr", skills: false });
+  assert.equal(proxyRoute("/v1/skill/nope"), null);
   assert.equal(secretName("open-ai"), "OPEN_AI_API_KEY");
   assert.equal(keyPrefix("sk-abcdefghijklmnop"), "sk-abcdefgh");
 });
@@ -774,6 +792,38 @@ test("admin session cookie is signed, expiring, not the raw token", async () => 
   assert.equal(adminSessionSetCookie(value, "http://127.0.0.1:8787/admin").includes("Secure"), false);
   assert.match(adminSessionClearCookie("https://aofahub.dev/admin"), /Max-Age=0/);
   assert.equal(readCookie(`a=1; ${ADMIN_SESSION_COOKIE}=${value}; b=2`, ADMIN_SESSION_COOKIE), value);
+});
+
+test("chat session binds key id and is not an admin session", async () => {
+  const secret = "admin-token-secret";
+  const keyId = "11111111-1111-1111-1111-111111111111";
+  const now = 1_700_000_000_000;
+  const value = await mintChatSession(secret, keyId, now);
+  assert.equal(await verifyChatSession(secret, value, now), keyId);
+  assert.equal(await verifyChatSession("other", value, now), null);
+  assert.equal(await verifyAdminSession(secret, value, now), false);
+  const cookie = (await import("./lib.ts")).chatSessionSetCookie(value, "https://aofahub.dev/chat/api/login");
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /SameSite=Lax/);
+  assert.match(cookie, /Domain=\.aofahub.dev/);
+  assert.match(cookie, /Path=\//);
+  assert.equal((await import("./lib.ts")).chatSessionSetCookie(value, "http://localhost:8787/").includes("Domain="), false);
+});
+
+test("password is hashed, username is normalized", async () => {
+  const { salt, hash } = await hashPassword("s3cret-pass");
+  assert.equal(await verifyPassword("s3cret-pass", salt, hash), true);
+  assert.equal(await verifyPassword("wrong", salt, hash), false);
+  assert.equal(parseUsername("Alice_01"), "alice_01");
+  assert.equal(generatePassword().length, 16);
+  assert.equal(isChatOrigin("https://chat.aofahub.dev"), true);
+  assert.equal(isChatOrigin("http://localhost:8090"), true);
+  assert.equal(isChatOrigin("https://evil.example"), false);
+  const cred = corsHeaders(new Request("https://aofahub.dev/v1/models", { headers: { origin: "https://chat.aofahub.dev" } }));
+  assert.equal(cred["access-control-allow-origin"], "https://chat.aofahub.dev");
+  assert.equal(cred["access-control-allow-credentials"], "true");
+  const star = corsHeaders();
+  assert.equal(star["access-control-allow-origin"], "*");
 });
 
 test("admit gate blocks rpm and inflight, not a few sequential calls", () => {

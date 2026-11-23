@@ -3,5 +3,7 @@ declare namespace Cloudflare {
   interface Env {
     ADMIN_TOKEN: string;
     DEFAULT_QUOTA_TOKENS: string;
+    TAVILY_API_KEY?: string;
+    BRAVE_API_KEY?: string;
   }
 }

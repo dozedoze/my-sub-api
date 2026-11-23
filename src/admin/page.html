@@ -34,6 +34,7 @@
       <nav aria-label="后台">
         <a class="nav on" href="/admin/keys" data-nav="keys" aria-current="page">分发账号</a>
         <a class="nav" href="/admin/upstream" data-nav="upstream">上游账号</a>
+        <a class="nav" href="/admin/skills" data-nav="skills">通用 Skill</a>
         <a class="nav" href="/admin/guide" data-nav="guide">接入指南</a>
       </nav>
       <button class="ghost" type="button" id="logout">退出</button>
@@ -42,7 +43,7 @@
       <section data-page="keys">
         <header class="page-head">
           <h1>分发账号管理</h1>
-          <p class="sub">签发、调整额度、停用。明文只在创建时出现一次。</p>
+          <p class="sub">签发、发聊天用户名密码、调整额度、停用。明文只在创建时出现一次。</p>
         </header>
         <section class="card">
           <div class="toolbar">
@@ -53,14 +54,36 @@
           <div class="keys-wrap">
             <table class="keys">
               <colgroup>
-                <col class="c-name" /><col class="c-prefix" /><col class="c-prov" /><col class="c-used" />
+                <col class="c-name" /><col class="c-user" /><col class="c-prefix" /><col class="c-prov" /><col class="c-used" />
                 <col class="c-quota" /><col class="c-remain" /><col class="c-status" /><col class="c-actions" />
               </colgroup>
-              <thead><tr><th>备注</th><th>前缀</th><th>上游</th><th>已用</th><th>额度</th><th>剩余</th><th>状态</th><th></th></tr></thead>
+              <thead><tr><th>备注</th><th>用户名</th><th>前缀</th><th>上游</th><th>已用</th><th>额度</th><th>剩余</th><th>状态</th><th></th></tr></thead>
               <tbody id="rows"></tbody>
             </table>
           </div>
         </section>
+      </section>
+
+      <section data-page="skills" hidden>
+        <header class="page-head">
+          <h1>通用 Skill</h1>
+          <p class="sub">只挂在 /v1/skill/* 。默认 /v1 纯转发，Cursor 不受影响。</p>
+        </header>
+        <div class="page-body">
+        <section class="card">
+          <p class="hint" id="skills-search-hint"></p>
+          <label class="check"><input type="checkbox" id="skill-web_search" /> web_search（联网搜索）</label>
+          <label class="check"><input type="checkbox" id="skill-fetch_url" /> fetch_url（读网页）</label>
+          <div class="field" style="margin-top:12px;max-width:180px">
+            <label for="skill-rounds">最多工具轮次</label>
+            <input id="skill-rounds" type="number" min="1" max="8" value="3" />
+          </div>
+          <p class="err" id="skills-err"></p>
+          <div class="actions" style="justify-content:flex-start">
+            <button type="button" id="skills-save">保存</button>
+          </div>
+        </section>
+        </div>
       </section>
 
       <section data-page="upstream" hidden>
@@ -133,7 +156,15 @@
     <h2>新建分发账号</h2>
     <div class="field">
       <label for="name">备注</label>
-      <input id="name" placeholder="例如 workbuddy-小王" />
+      <input id="name" placeholder="例如 小王" />
+    </div>
+    <div class="field">
+      <label for="username">聊天用户名（可选）</label>
+      <input id="username" autocomplete="off" placeholder="2-32 位字母数字，可登 chat.aofahub.dev" />
+    </div>
+    <div class="field">
+      <label for="password">聊天密码（可选，空则自动生成）</label>
+      <input id="password" type="password" autocomplete="new-password" placeholder="至少 8 位，或留空自动生成" />
     </div>
     <div class="field">
       <label for="provider">上游账号</label>
@@ -153,9 +184,23 @@
   </dialog>
   <dialog id="once-dlg">
     <h2>分发账号已签发</h2>
-    <p class="hint">请将以下两项发送给使用者。关闭后无法再次查看。</p>
+    <p class="hint">请将下列内容发给使用者。关闭后无法再次查看明文。</p>
+    <div class="copy-field" id="once-user-wrap" hidden>
+      <div class="copy-field-label">聊天用户名</div>
+      <button type="button" class="copy-field-btn" id="copy-once-user">
+        <span class="mono" id="once-user"></span>
+        <span class="copy-field-tip">点击复制</span>
+      </button>
+    </div>
+    <div class="copy-field" id="once-pass-wrap" hidden>
+      <div class="copy-field-label">聊天密码</div>
+      <button type="button" class="copy-field-btn copy-field-key" id="copy-once-pass">
+        <span class="mono" id="once-pass"></span>
+        <span class="copy-field-tip">点击复制</span>
+      </button>
+    </div>
     <div class="copy-field">
-      <div class="copy-field-label">API Key</div>
+      <div class="copy-field-label">API Key（Cursor / OpenCode）</div>
       <button type="button" class="copy-field-btn copy-field-key" id="copy-once-key">
         <span class="mono" id="once-key"></span>
         <span class="copy-field-tip">点击复制</span>

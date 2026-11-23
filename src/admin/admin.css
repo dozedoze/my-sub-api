@@ -193,18 +193,21 @@ th { color: var(--muted); font-weight: 500; }
 .keys-wrap { overflow: auto; min-height: 0; }
 .keys {
   table-layout: fixed;
-  min-width: 1040px;
+  min-width: 1180px;
   border-collapse: separate;
   border-spacing: 0;
 }
-.keys .c-name { width: 160px; }
+.keys .c-name { width: 140px; }
+.keys .c-user { width: 120px; }
 .keys .c-prefix { width: 128px; }
+.check { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--text); }
+.check input { width: auto; }
 .keys .c-prov { width: 80px; }
 .keys .c-used { width: 100px; }
 .keys .c-quota { width: 200px; }
 .keys .c-remain { width: 80px; }
 .keys .c-status { width: 80px; }
-.keys .c-actions { width: 214px; }
+.keys .c-actions { width: 280px; }
 .keys th, .keys td {
   overflow: hidden;
   text-overflow: ellipsis;

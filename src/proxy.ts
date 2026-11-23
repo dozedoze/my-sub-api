@@ -3,6 +3,7 @@ import {
   chatSseToAnthropic,
   chatToMessage,
   chatToolChoiceAny,
+  DEEPSEEK_ANTHROPIC,
   messagesTarget,
   messagesToChat,
   messagesToResponses,
@@ -14,6 +15,7 @@ import {
 } from "./anthropic";
 import { currentAuto, isAutoModel, planAuto } from "./auto";
 import { quotaBoard, type ChatSession, type QuotaBoard } from "./durable";
+import { sessionUser } from "./chat-api";
 import { banUpstream, loadUpstreamBans, lookupByPlaintext } from "./keys";
 import {
   applyChatSseLine,
@@ -76,33 +78,27 @@ const HOP = new Set([
   "api-key",
 ]);
 
+async function rejectAnon(board: DurableObjectStub<QuotaBoard>, ip: string, message: string): Promise<never> {
+  throwIfAdmitFailed(
+    await board.admit(`anon:${ip}`, {
+      quota: 0,
+      maxRpm: GATE.anonRpm,
+      maxInflight: GATE.keyInflight,
+      takeInflight: false,
+    }),
+  );
+  throw new GatewayError(401, "invalid_api_key", message);
+}
+
 export async function proxy(request: Request, env: Env, ctx: ExecutionContext, rest: string): Promise<Response> {
   const board = quotaBoard(env);
   const ip = clientIp(request);
   const token = extractToken(request);
-  if (!token) {
-    throwIfAdmitFailed(
-      await board.admit(`anon:${ip}`, {
-        quota: 0,
-        maxRpm: GATE.anonRpm,
-        maxInflight: GATE.keyInflight,
-        takeInflight: false,
-      }),
-    );
-    throw new GatewayError(401, "invalid_api_key", "Missing API key");
+  const found = token ? await lookupByPlaintext(env.KEYS, token) : await sessionUser(request, env);
+  if (!found) {
+    await rejectAnon(board, ip, token ? "Invalid API key" : "Missing API key");
   }
-  const issued = await lookupByPlaintext(env.KEYS, token);
-  if (!issued) {
-    throwIfAdmitFailed(
-      await board.admit(`anon:${ip}`, {
-        quota: 0,
-        maxRpm: GATE.anonRpm,
-        maxInflight: GATE.keyInflight,
-        takeInflight: false,
-      }),
-    );
-    throw new GatewayError(401, "invalid_api_key", "Invalid API key");
-  }
+  const issued = found as NonNullable<typeof found>;
 
   const { live } = loadProviders(env);
   const map = new Map(live.map((p) => [p.id, p]));
@@ -166,6 +162,10 @@ async function proxyAfterGate(
 ): Promise<Response> {
   const { issued, live, map, blocked, aliases, autoRoute, defaultProvider, board, hold } = ctxp;
 
+  if (isRawRest(rest)) {
+    return rawUpstream(request, env, rest, { issued, live, map, blocked, board, hold });
+  }
+
   if ((rest === "models" || rest.startsWith("models/")) && request.method === "GET") {
     if (issued.provider && blocked.has(issued.provider)) {
       throw new GatewayError(503, "provider_blacklisted", `Upstream '${issued.provider}' is blacklisted`);
@@ -197,7 +197,7 @@ async function proxyAfterGate(
     if ("model" in payload && typeof payload.model === "string") model = payload.model;
   }
   if (rest === "messages/count_tokens") {
-    return Response.json({ input_tokens: estimateTokens(payload) }, { headers: corsHeaders() });
+    return Response.json({ input_tokens: estimateTokens(payload) }, { headers: corsHeaders(request) });
   }
 
   const conversational =
@@ -414,6 +414,7 @@ async function proxyAfterGate(
         await sessionStub.saveAutoModel(spec);
       }
       const handed: Handed = {
+        request,
         sessionId,
         sessionStub,
         autoTier: autoTierName,
@@ -456,13 +457,14 @@ async function listModels(
     const want = decodeURIComponent(rest.slice("models/".length));
     const found = matchListedModel(listed, want);
     if (!found) throw new GatewayError(404, "not_found", `Model '${want}' not found`);
-    return Response.json(anthropicModelCard(found, want), { headers: corsHeaders() });
+    return Response.json(anthropicModelCard(found, want), { headers: corsHeaders(request) });
   }
   const data = request.headers.has("anthropic-version") ? claudeDiscoveryModels(listed) : listed;
-  return Response.json({ object: "list", data }, { headers: corsHeaders() });
+  return Response.json({ object: "list", data }, { headers: corsHeaders(request) });
 }
 
 type Handed = {
+  request: Request;
   sessionId?: string;
   sessionStub?: DurableObjectStub<ChatSession>;
   autoTier?: "easy" | "hard";
@@ -478,7 +480,7 @@ type Handed = {
 };
 
 function clientHeaders(upstream: Response | null, session: Handed): Headers {
-  const headers = new Headers(corsHeaders());
+  const headers = new Headers(corsHeaders(session.request));
   if (upstream) {
     for (const name of ["content-type", "cache-control", "x-request-id"]) {
       const v = upstream.headers.get(name);
@@ -643,4 +645,70 @@ async function respondJsonAndSave(
     }
   }
   return new Response(text, { status: upstream.status, statusText: upstream.statusText, headers });
+}
+
+function isRawRest(rest: string): boolean {
+  return rest === "files" || rest.startsWith("files/") || rest === "tools/asr" || rest === "tools/tts";
+}
+
+function isDeepseek(p: Provider): boolean {
+  try {
+    const host = new URL(p.baseUrl).hostname.toLowerCase();
+    return host === "deepseek.com" || host.endsWith(".deepseek.com");
+  } catch {
+    return false;
+  }
+}
+
+async function rawUpstream(
+  request: Request,
+  _env: Env,
+  rest: string,
+  ctxp: {
+    issued: NonNullable<Issued>;
+    live: Provider[];
+    map: Map<string, Provider>;
+    blocked: Set<string>;
+    board: DurableObjectStub<QuotaBoard>;
+    hold: { inflight: boolean };
+  },
+): Promise<Response> {
+  const { issued, live, map, blocked, board, hold } = ctxp;
+  if (issued.provider && blocked.has(issued.provider)) {
+    throw new GatewayError(503, "provider_blacklisted", `Upstream '${issued.provider}' is blacklisted`);
+  }
+  const pool = (issued.provider ? [map.get(issued.provider)] : live).filter(
+    (p): p is Provider => p != null && !blocked.has(p.id) && isDeepseek(p),
+  );
+  const account = pool[0];
+  if (!account) throw new GatewayError(400, "invalid_request", "DeepSeek upstream is required for this path");
+  if (bodyTooLarge(request, undefined, GATE.maxFileBytes)) {
+    throw new GatewayError(413, "invalid_request", "Request body too large");
+  }
+  const headers = new Headers();
+  request.headers.forEach((value, key) => {
+    if (!HOP.has(key.toLowerCase())) headers.set(key, value);
+  });
+  headers.set("authorization", `Bearer ${account.apiKey}`);
+  if (rest === "files" || rest.startsWith("files/")) headers.set("x-api-key", account.apiKey);
+  const base = rest.startsWith("tools/") ? account.baseUrl : DEEPSEEK_ANTHROPIC;
+  const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
+  const upstream = await fetch(joinUrl(base, rest), { method: request.method, headers, body });
+  hold.inflight = false;
+  try {
+    await board.add(issued.id, account.id, chargeEstimate(rest, rest), rest);
+  } catch {
+    /* ignore meter failure */
+  }
+  try {
+    await board.release(issued.id);
+  } catch {
+    /* ignore */
+  }
+  const out = new Headers(corsHeaders(request));
+  for (const name of ["content-type", "cache-control", "x-request-id"]) {
+    const v = upstream.headers.get(name);
+    if (v) out.set(name, v);
+  }
+  return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: out });
 }

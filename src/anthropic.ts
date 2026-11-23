@@ -8,7 +8,7 @@ export type MessagesWire = "anthropic" | "chat" | "responses";
 
 const OPENCODE_ANTHROPIC = "https://opencode.ai/inference/go/anthropic/v1";
 const OPENCODE_OPENAI = "https://opencode.ai/inference/go/openai/v1";
-const DEEPSEEK_ANTHROPIC = "https://api.deepseek.com/anthropic/v1";
+export const DEEPSEEK_ANTHROPIC = "https://api.deepseek.com/anthropic/v1";
 
 type ChatMsg = {
   role: string;
@@ -93,12 +93,19 @@ function isClientTool(tool: Record<string, unknown>): boolean {
   return tool.type === "custom" || tool.type === "function";
 }
 
+function isDeepseekHostedTool(tool: Record<string, unknown>): boolean {
+  return tool.name === "deepseek_web_search" || tool.name === "deepseek_read_url";
+}
+
 /** 非 Anthropic 官方的 messages 上游不托管服务端工具。滤掉之后不能留悬空的 tool_choice。 */
-function withoutUnhosted(body: Record<string, unknown>): Record<string, unknown> {
+function withoutUnhosted(
+  body: Record<string, unknown>,
+  keep: (tool: Record<string, unknown>) => boolean = () => false,
+): Record<string, unknown> {
   if (!Array.isArray(body.tools) && body.tool_choice === undefined) return body;
   const tools = (Array.isArray(body.tools) ? body.tools : []).filter((tool) => {
     const rec = asRecord(tool);
-    return rec != null && isClientTool(rec);
+    return rec != null && (isClientTool(rec) || keep(rec));
   });
   if (!tools.length) {
     const { tools: _tools, tool_choice: _choice, ...rest } = body;
@@ -126,7 +133,7 @@ export function prepareAnthropic(baseUrl: string, body: Record<string, unknown>)
     const { output_config: _oc, context_management: _cm, ...rest } = next;
     next = rest;
   }
-  next = withoutUnhosted(next);
+  next = withoutUnhosted(next, deepseek ? isDeepseekHostedTool : () => false);
   const thinking = asRecord(next.thinking);
   if (opencode && thinking?.type === "adaptive") {
     next = {

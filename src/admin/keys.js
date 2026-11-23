@@ -5,6 +5,7 @@ function asKeyView(k) {
     id: k.id,
     name: k.name,
     prefix: k.prefix,
+    username: k.username,
     enabled: k.enabled !== false,
     createdAt: k.createdAt || Date.now(),
     provider: k.provider,
@@ -65,7 +66,7 @@ function recentLine(time, model, tokens, head) {
   tokenTd.colSpan = 2;
   tokenTd.textContent = tokens;
   const rest = document.createElement("td");
-  rest.colSpan = 3;
+  rest.colSpan = 4;
   tr.append(timeTd, modelTd, tokenTd, rest);
   return tr;
 }
@@ -118,6 +119,9 @@ function paintKeyRows(keys) {
     const nameTd = document.createElement("td");
     nameTd.textContent = k.name;
     nameTd.title = k.name;
+    const userTd = document.createElement("td");
+    userTd.className = "mono";
+    userTd.textContent = k.username || "—";
     const prefixTd = document.createElement("td");
     prefixTd.className = "mono";
     prefixTd.textContent = k.prefix + "…";
@@ -213,9 +217,30 @@ function paintKeyRows(keys) {
       });
     };
     const recent = recentToggle(k.recent);
-    td.append(rev, del);
+    td.append(rev);
+    if (k.username) {
+      const reset = document.createElement("button");
+      reset.className = "ghost";
+      reset.textContent = "重置密码";
+      reset.onclick = async () => {
+        if (!confirm("将生成新密码，旧密码立刻失效。")) return;
+        await withBusy(reset, async () => {
+          const data = await api("/admin/api/keys/" + k.id, { method: "POST", body: JSON.stringify({ resetPassword: true }) });
+          lastPlain = "";
+          lastPass = data.password || "";
+          document.getElementById("once-user-wrap").hidden = false;
+          document.getElementById("once-pass-wrap").hidden = false;
+          document.getElementById("once-user").textContent = k.username;
+          document.getElementById("once-pass").textContent = lastPass;
+          document.getElementById("once-key").textContent = "（未重新签发 Key）";
+          onceDlg.showModal();
+        });
+      };
+      td.append(reset);
+    }
+    td.append(del);
     if (recent) td.append(recent.btn);
-    tr.append(nameTd, prefixTd, provTd, usedTd, quotaTd, remainTd, statusTd, td);
+    tr.append(nameTd, userTd, prefixTd, provTd, usedTd, quotaTd, remainTd, statusTd, td);
     tb.append(tr);
     if (recent) tb.append(...recent.rows);
   }
@@ -229,6 +254,7 @@ for (const id of ["refresh", "refresh-upstream"]) {
 const dlg = document.getElementById("create-dlg");
 const onceDlg = document.getElementById("once-dlg");
 let lastPlain = "";
+let lastPass = "";
 const quotaEl = document.getElementById("quota");
 const paintCreateQuota = bindQuotaLive(
   quotaEl,
@@ -238,6 +264,8 @@ const paintCreateQuota = bindQuotaLive(
 function resetCreateForm() {
   document.getElementById("create-err").textContent = "";
   document.getElementById("name").value = "";
+  document.getElementById("username").value = "";
+  document.getElementById("password").value = "";
   quotaEl.value = "";
   document.getElementById("provider").value = "";
   paintCreateQuota();
@@ -250,6 +278,8 @@ document.getElementById("open-create").onclick = () => {
 document.getElementById("create-cancel").onclick = () => dlg.close();
 document.getElementById("once-close").onclick = () => onceDlg.close();
 bindCopyField(document.getElementById("copy-once-key"), () => lastPlain);
+bindCopyField(document.getElementById("copy-once-user"), () => document.getElementById("once-user").textContent);
+bindCopyField(document.getElementById("copy-once-pass"), () => lastPass);
 bindCopyField(document.getElementById("copy-once-url"), () => ORIGIN + "/v1");
 document.getElementById("create").onclick = async () => {
   const err = document.getElementById("create-err");
@@ -257,6 +287,8 @@ document.getElementById("create").onclick = async () => {
   const q = document.getElementById("quota").value.trim();
   const body = {
     name: document.getElementById("name").value,
+    username: document.getElementById("username").value.trim() || undefined,
+    password: document.getElementById("password").value || undefined,
     provider: document.getElementById("provider").value || undefined,
     quotaTokens: q === "" ? undefined : Number(q),
   };
@@ -264,7 +296,12 @@ document.getElementById("create").onclick = async () => {
     try {
       const data = await api("/admin/api/keys", { method: "POST", body: JSON.stringify(body) });
       lastPlain = data.key;
+      lastPass = data.password || "";
       document.getElementById("once-key").textContent = data.key;
+      document.getElementById("once-user").textContent = data.username || "";
+      document.getElementById("once-pass").textContent = lastPass;
+      document.getElementById("once-user-wrap").hidden = !data.username;
+      document.getElementById("once-pass-wrap").hidden = !data.password;
       document.getElementById("once-base").textContent = ORIGIN + "/v1";
       for (const el of document.getElementById("how-tabs").querySelectorAll(".tab")) {
         el.classList.toggle("on", el.dataset.tab === "workbuddy");

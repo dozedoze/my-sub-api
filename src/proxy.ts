@@ -69,7 +69,7 @@ import {
   type ChatMessage,
   type Provider,
 } from "./lib";
-import { fetchJsonSilent, fetchUpstreamModels } from "./upstream";
+import { fetchJsonSilent, fetchUpstreamCatalog } from "./upstream";
 
 const HOP = new Set([
   "authorization",
@@ -469,12 +469,13 @@ async function proxyAfterGate(
   throw lastFailure ?? new GatewayError(502, "upstream_error", "Failed to reach upstream provider");
 }
 
-async function fetchGroupModels(members: Provider[]): Promise<string[]> {
+async function fetchGroupModels(members: Provider[]): Promise<{ models: string[]; windows: Record<string, number> }> {
   for (const p of members) {
-    const ids = (await fetchUpstreamModels(p)).filter((id) => modelAllowed(p, id));
-    if (ids.length) return ids;
+    const { ids, windows } = await fetchUpstreamCatalog(p);
+    const models = ids.filter((id) => modelAllowed(p, id));
+    if (models.length) return { models, windows };
   }
-  return [];
+  return { models: [], windows: {} };
 }
 
 /** auto 的开关意义是「走复杂档」，所以单独标出来。其余按上游和模型名认。 */
@@ -497,7 +498,7 @@ async function listModels(
   rest: string,
 ): Promise<Response> {
   const groups = await Promise.all(
-    vendorGroups(providers).map(async (g) => ({ providerId: g.id, models: await fetchGroupModels(g.members) })),
+    vendorGroups(providers).map(async (g) => ({ providerId: g.id, ...(await fetchGroupModels(g.members)) })),
   );
   const heads = new Map(vendorGroups(providers).map((g) => [g.id, g.members[0]]));
   const listed = (includeAuto ? exposeAutoModel(exposeModels(groups)) : exposeModels(groups)).map((m) => ({

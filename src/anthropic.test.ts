@@ -320,6 +320,42 @@ test("chat sse becomes anthropic events", async () => {
   assert.equal((events[5].data?.delta as { partial_json: string }).partial_json, '{"a":1}');
   assert.equal((events[7].data?.delta as { stop_reason: string }).stop_reason, "tool_use");
   assert.equal((events[7].data?.usage as { output_tokens: number }).output_tokens, 5);
+  // 上游的用量在最后一块才到，message_start 里是 0，所以收尾的 message_delta 必须带上输入量。
+  assert.equal((events[7].data?.usage as { input_tokens: number }).input_tokens, 2);
+});
+
+test("chat usage is reported the Anthropic way: cached tokens split out of input", () => {
+  const msg = chatToMessage(
+    {
+      id: "c1",
+      model: "gpt-5",
+      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 100, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 60 } },
+    },
+    "gpt-5",
+  );
+  assert.deepEqual(msg.usage, {
+    input_tokens: 40,
+    output_tokens: 7,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 60,
+  });
+});
+
+test("usage already in Anthropic terms is not subtracted twice", () => {
+  const msg = chatToMessage(
+    {
+      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      usage: { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 50, cache_creation_input_tokens: 5 },
+    },
+    "m",
+  );
+  assert.deepEqual(msg.usage, {
+    input_tokens: 10,
+    output_tokens: 3,
+    cache_creation_input_tokens: 5,
+    cache_read_input_tokens: 50,
+  });
 });
 
 test("server tools survive only on an upstream that can run them", () => {

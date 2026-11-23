@@ -721,13 +721,35 @@ function responseText(content: unknown): string {
   return out;
 }
 
-function usageFields(rec: Record<string, unknown>): Record<string, unknown> {
-  const usage = asRecord(rec.usage) ?? {};
+type TokenUsage = { input: number; output: number; cacheRead: number; cacheWrite: number };
+
+/**
+ * 上游用量换成 Anthropic 口径：input_tokens 不含缓存，缓存读写单列，三者相加才是整段输入。
+ * OpenAI 系的 prompt_tokens 已含缓存命中，要减掉；上游本来就按 Anthropic 口径给的则原样用。
+ */
+function readTokenUsage(usage: Record<string, unknown> | null): TokenUsage {
+  const u = usage ?? {};
+  const details = asRecord(u.prompt_tokens_details) ?? asRecord(u.input_tokens_details) ?? {};
+  const prompt = num(u.prompt_tokens) ?? num(u.input_tokens) ?? 0;
+  const anthropicStyle = num(u.cache_read_input_tokens) !== null || num(u.cache_creation_input_tokens) !== null;
+  const cacheRead =
+    num(u.cache_read_input_tokens) ?? num(details.cached_tokens) ?? num(u.prompt_cache_hit_tokens) ?? 0;
+  const cacheWrite = num(u.cache_creation_input_tokens) ?? num(details.cache_write_tokens) ?? 0;
   return {
-    input_tokens: usage.input_tokens ?? usage.prompt_tokens ?? 0,
-    output_tokens: usage.output_tokens ?? usage.completion_tokens ?? 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
+    input: anthropicStyle ? prompt : Math.max(0, prompt - cacheRead - cacheWrite),
+    output: num(u.completion_tokens) ?? num(u.output_tokens) ?? 0,
+    cacheRead,
+    cacheWrite,
+  };
+}
+
+function usageFields(rec: Record<string, unknown>): Record<string, unknown> {
+  const t = readTokenUsage(asRecord(rec.usage));
+  return {
+    input_tokens: t.input,
+    output_tokens: t.output,
+    cache_creation_input_tokens: t.cacheWrite,
+    cache_read_input_tokens: t.cacheRead,
   };
 }
 
@@ -803,7 +825,27 @@ type SseState = {
   finish: unknown;
   input: number;
   output: number;
+  cacheRead: number;
+  cacheWrite: number;
 };
+
+function hasTokenCounts(u: Record<string, unknown>): boolean {
+  return ["prompt_tokens", "input_tokens", "completion_tokens", "output_tokens"].some((k) => num(u[k]) !== null);
+}
+
+function applyUsage(t: TokenUsage): Pick<SseState, "input" | "output" | "cacheRead" | "cacheWrite"> {
+  return { input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite };
+}
+
+/** message_start 发出时上游的用量往往还没到，所以收尾的 message_delta 要把完整用量再带一遍。 */
+function finalUsage(state: SseState): Record<string, number> {
+  return {
+    input_tokens: state.input,
+    output_tokens: state.output,
+    cache_creation_input_tokens: state.cacheWrite,
+    cache_read_input_tokens: state.cacheRead,
+  };
+}
 
 function sseEvent(event: string, data: unknown): Uint8Array {
   return new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -826,6 +868,8 @@ export function chatSseToAnthropic(stream: ReadableStream<Uint8Array>, model: st
     finish: null,
     input: 0,
     output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
   };
   const decoder = new TextDecoder();
   let buf = "";
@@ -851,12 +895,7 @@ export function chatSseToAnthropic(stream: ReadableStream<Uint8Array>, model: st
           content: [],
           stop_reason: null,
           stop_sequence: null,
-          usage: {
-            input_tokens: state.input,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-          },
+          usage: { ...finalUsage(state), output_tokens: 0 },
         },
       }),
     );
@@ -881,7 +920,7 @@ export function chatSseToAnthropic(stream: ReadableStream<Uint8Array>, model: st
       sseEvent("message_delta", {
         type: "message_delta",
         delta: { stop_reason: stopReason(state.finish, state.hadTools), stop_sequence: null },
-        usage: { output_tokens: state.output },
+        usage: finalUsage(state),
       }),
     );
     controller.enqueue(sseEvent("message_stop", { type: "message_stop" }));
@@ -906,10 +945,7 @@ export function chatSseToAnthropic(stream: ReadableStream<Uint8Array>, model: st
     if (typeof json.id === "string") state.id = json.id;
     if (typeof json.model === "string") state.model = json.model;
     const usage = asRecord(json.usage);
-    if (usage) {
-      state.input = num(usage.prompt_tokens) ?? num(usage.input_tokens) ?? state.input;
-      state.output = num(usage.completion_tokens) ?? num(usage.output_tokens) ?? state.output;
-    }
+    if (usage && hasTokenCounts(usage)) Object.assign(state, applyUsage(readTokenUsage(usage)));
     const choice = asRecord(Array.isArray(json.choices) ? json.choices[0] : null);
     if (!choice) return;
     if (choice.finish_reason != null) state.finish = choice.finish_reason;
@@ -1038,6 +1074,8 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
     finish: null,
     input: 0,
     output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
   };
   const decoder = new TextDecoder();
   let buf = "";
@@ -1071,12 +1109,7 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
           content: [],
           stop_reason: null,
           stop_sequence: null,
-          usage: {
-            input_tokens: state.input,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-          },
+          usage: { ...finalUsage(state), output_tokens: 0 },
         },
       }),
     );
@@ -1119,7 +1152,7 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
       sseEvent("message_delta", {
         type: "message_delta",
         delta: { stop_reason: stopReason(state.finish, state.hadTools), stop_sequence: null },
-        usage: { output_tokens: state.output },
+        usage: finalUsage(state),
       }),
     );
     controller.enqueue(sseEvent("message_stop", { type: "message_stop" }));
@@ -1143,10 +1176,7 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
       if (typeof response.id === "string") state.id = response.id;
       if (typeof response.model === "string") state.model = response.model;
       const usage = asRecord(response.usage);
-      if (usage) {
-        state.input = num(usage.input_tokens) ?? state.input;
-        state.output = num(usage.output_tokens) ?? state.output;
-      }
+      if (usage && hasTokenCounts(usage)) Object.assign(state, applyUsage(readTokenUsage(usage)));
       if (response.status === "incomplete") state.finish = "length";
       const found = reasoningFromOutput(response.output);
       if (found.length) reasoningItems = found;

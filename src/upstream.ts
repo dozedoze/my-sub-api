@@ -2,6 +2,7 @@ import {
   isGoSubscription,
   joinUrl,
   parseModelsResponse,
+  parseModelWindows,
   parseOpencodeBalance,
   parseOpencodeGoUsage,
   parseQuotaPayload,
@@ -146,15 +147,22 @@ export async function fetchJsonSilent(url: string, apiKey: string): Promise<unkn
   }
 }
 
-export async function fetchUpstreamModels(provider: Provider): Promise<string[]> {
+export async function fetchUpstreamCatalog(
+  provider: Provider,
+): Promise<{ ids: string[]; windows: Record<string, number> }> {
   try {
     const res = await fetch(joinUrl(provider.baseUrl, "models"), {
       headers: { authorization: `Bearer ${provider.apiKey}` },
       signal: AbortSignal.timeout(8000),
     });
-    if (!res.ok) return [];
-    return parseModelsResponse(await res.json());
+    if (!res.ok) return { ids: [], windows: {} };
+    const json = await res.json();
+    return { ids: parseModelsResponse(json), windows: parseModelWindows(json) };
   } catch {
-    return [];
+    return { ids: [], windows: {} };
   }
+}
+
+export async function fetchUpstreamModels(provider: Provider): Promise<string[]> {
+  return (await fetchUpstreamCatalog(provider)).ids;
 }

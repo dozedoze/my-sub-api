@@ -1341,29 +1341,50 @@ export function parseModelsResponse(json: unknown): string[] {
   return ids;
 }
 
-export function exposeModels(groups: { providerId: string; models: string[] }[]): {
-  id: string;
-  object: "model";
-  created: number;
-  owned_by: string;
-}[] {
-  const prefix = groups.length > 1;
-  const seen = new Set<string>();
-  const out: { id: string; object: "model"; created: number; owned_by: string }[] = [];
-  for (const g of groups) {
-    for (const raw of g.models) {
-      const id = prefix ? `${g.providerId}/${raw}` : raw;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      out.push({ id, object: "model", created: 0, owned_by: g.providerId });
+const WINDOW_KEYS = ["context_length", "context_window", "max_input_tokens", "max_context_length"] as const;
+
+/** 上游 /models 里带了上下文窗口的，按原始 id 收下；没带的不出现，由前端自己估。 */
+export function parseModelWindows(json: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!json || typeof json !== "object") return out;
+  const rec = json as { data?: unknown; models?: unknown };
+  const raw = Array.isArray(rec.data) ? rec.data : Array.isArray(rec.models) ? rec.models : [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const card = item as Record<string, unknown>;
+    if (typeof card.id !== "string" || !card.id.trim()) continue;
+    for (const key of WINDOW_KEYS) {
+      const value = card[key];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        out[card.id.trim()] = Math.floor(value);
+        break;
+      }
     }
   }
   return out;
 }
 
-export function exposeAutoModel(
-  models: { id: string; object: "model"; created: number; owned_by: string }[],
-): { id: string; object: "model"; created: number; owned_by: string }[] {
+type ExposedModel = { id: string; object: "model"; created: number; owned_by: string; context_length?: number };
+
+export function exposeModels(
+  groups: { providerId: string; models: string[]; windows?: Record<string, number> }[],
+): ExposedModel[] {
+  const prefix = groups.length > 1;
+  const seen = new Set<string>();
+  const out: ExposedModel[] = [];
+  for (const g of groups) {
+    for (const raw of g.models) {
+      const id = prefix ? `${g.providerId}/${raw}` : raw;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const window = g.windows?.[raw];
+      out.push({ id, object: "model", created: 0, owned_by: g.providerId, ...(window ? { context_length: window } : {}) });
+    }
+  }
+  return out;
+}
+
+export function exposeAutoModel(models: ExposedModel[]): ExposedModel[] {
   if (models.some((m) => m.id === "auto")) return models;
   return [{ id: "auto", object: "model", created: 0, owned_by: "auto" }, ...models];
 }
@@ -1375,6 +1396,8 @@ export type ListedModel = {
   owned_by: string;
   display_name?: string;
   description?: string;
+  /** 上游给了就透传；没有就不返回，由客户端按模型名估。 */
+  context_length?: number;
   /** 深度思考能力：toggle / effort / always / none / unknown，auto 本身是 auto。 */
   thinking?: string;
 };
@@ -1415,6 +1438,7 @@ export function anthropicModelCard(model: ListedModel, requestedId = model.id): 
     created: model.created,
     created_at: new Date(model.created * 1000).toISOString(),
     owned_by: model.owned_by,
+    ...(model.context_length ? { max_input_tokens: model.context_length, context_length: model.context_length } : {}),
   };
 }
 

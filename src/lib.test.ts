@@ -33,6 +33,7 @@ import {
   parseProviders,
   parseJsonObject,
   parseModelsResponse,
+  parseModelWindows,
   parseOpencodeBalance,
   parseOpencodeGoUsage,
   parseQuotaPayload,
@@ -947,4 +948,21 @@ test("login fails lock after GATE.loginFails", () => {
   const cleared = applyLoginOk(cur);
   assert.equal(cleared.fails, 0);
   assert.equal(loginRetryAfter(cleared, now), null);
+});
+
+test("model windows pass through only when the upstream states them", () => {
+  const json = {
+    data: [
+      { id: "a", context_length: 131072 },
+      { id: "b", max_input_tokens: 200000.9 },
+      { id: "c" },
+      { id: "d", context_length: 0 },
+      { id: "e", context_window: "big" },
+    ],
+  };
+  assert.deepEqual(parseModelWindows(json), { a: 131072, b: 200000 });
+  assert.deepEqual(parseModelWindows(null), {});
+  const listed = exposeModels([{ providerId: "p", models: ["a", "c"], windows: { a: 131072 } }]);
+  assert.equal(listed[0].context_length, 131072);
+  assert.equal("context_length" in listed[1], false);
 });

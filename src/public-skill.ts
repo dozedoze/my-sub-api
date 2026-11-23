@@ -14,11 +14,22 @@ export type PublicSkillScope = {
   enabled: boolean;
   /** 空字符串表示用内置默认内容。 */
   text: string;
+  /** 触发关键词（不分大小写，子串匹配）。最近几条用户消息命中其中一个才注入；空数组表示每次都注入。 */
+  triggers: string[];
 };
 
 export type PublicSkillConfig = Record<PublicSkillSurface, PublicSkillScope>;
 
 export const PUBLIC_SKILL_MAX_CHARS = 8000;
+export const PUBLIC_SKILL_MAX_TRIGGERS = 50;
+export const PUBLIC_SKILL_MAX_TRIGGER_CHARS = 64;
+/** 往前看几条用户消息；追问「继续」这类话时仍能带上提示。 */
+export const TRIGGER_LOOKBACK_USER_MESSAGES = 3;
+
+/** 前台默认只在聊到配置 MCP / Skill 时才注入，平时不占 token。没存过 triggers 的旧配置也用这份。 */
+export function defaultTriggers(surface: PublicSkillSurface): string[] {
+  return surface === "frontend" ? ["mcp", "skill", "技能", "扩展", "密钥", "secret", "外部工具", "接入工具"] : [];
+}
 
 export function frontendDefaultText(): string {
   return [
@@ -53,16 +64,66 @@ export function defaultText(surface: PublicSkillSurface): string {
 
 export function defaultPublicSkill(): PublicSkillConfig {
   return {
-    frontend: { enabled: true, text: "" },
-    apikey: { enabled: false, text: "" },
+    frontend: { enabled: true, text: "", triggers: defaultTriggers("frontend") },
+    apikey: { enabled: false, text: "", triggers: defaultTriggers("apikey") },
   };
+}
+
+function parseTriggers(raw: unknown, label: string, surface: PublicSkillSurface): string[] {
+  if (raw === undefined) return defaultTriggers(surface);
+  if (!Array.isArray(raw)) throw new GatewayError(400, "invalid_request", `${label}.triggers must be an array of strings`);
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") throw new GatewayError(400, "invalid_request", `${label}.triggers must be an array of strings`);
+    const word = item.trim();
+    if (!word) continue;
+    if (word.length > PUBLIC_SKILL_MAX_TRIGGER_CHARS) {
+      throw new GatewayError(400, "invalid_request", `${label}.triggers entries must be at most ${PUBLIC_SKILL_MAX_TRIGGER_CHARS} characters`);
+    }
+    if (!out.some((w) => w.toLowerCase() === word.toLowerCase())) out.push(word);
+  }
+  if (out.length > PUBLIC_SKILL_MAX_TRIGGERS) {
+    throw new GatewayError(400, "invalid_request", `${label}.triggers has more than ${PUBLIC_SKILL_MAX_TRIGGERS} entries`);
+  }
+  return out;
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      const rec = part && typeof part === "object" ? (part as { type?: unknown; text?: unknown }) : null;
+      return rec?.type === "text" && typeof rec.text === "string" ? rec.text : "";
+    })
+    .join("\n");
+}
+
+/** 最近几条用户消息里的文字（工具结果等非文字内容不算）。 */
+export function recentUserText(body: Record<string, unknown>): string {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const picked: string[] = [];
+  for (let i = messages.length - 1; i >= 0 && picked.length < TRIGGER_LOOKBACK_USER_MESSAGES; i--) {
+    const m = messages[i];
+    if (!m || typeof m !== "object" || (m as { role?: unknown }).role !== "user") continue;
+    const text = contentText((m as { content?: unknown }).content);
+    if (text) picked.push(text);
+  }
+  return picked.join("\n");
+}
+
+/** 没配关键词就一直触发；配了就要最近的用户消息命中其中一个。 */
+export function publicSkillTriggered(scope: PublicSkillScope, userText: string): boolean {
+  if (!scope.triggers.length) return true;
+  const haystack = userText.toLowerCase();
+  return scope.triggers.some((word) => haystack.includes(word.toLowerCase()));
 }
 
 function parseScope(raw: unknown, label: string, surface: PublicSkillSurface): PublicSkillScope {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new GatewayError(400, "invalid_request", `${label} must be an object`);
   }
-  const rec = raw as { enabled?: unknown; text?: unknown };
+  const rec = raw as { enabled?: unknown; text?: unknown; triggers?: unknown };
   if (typeof rec.enabled !== "boolean") throw new GatewayError(400, "invalid_request", `${label}.enabled must be a boolean`);
   const text = rec.text === undefined ? "" : rec.text;
   if (typeof text !== "string") throw new GatewayError(400, "invalid_request", `${label}.text must be a string`);
@@ -72,7 +133,11 @@ function parseScope(raw: unknown, label: string, surface: PublicSkillSurface): P
   if (text.includes("\0")) throw new GatewayError(400, "invalid_request", `${label}.text must not contain NUL characters`);
   const trimmed = text.trim();
   // 和内置默认一样就不存，这样默认内容以后改进了，没改过的站点自动跟上。
-  return { enabled: rec.enabled, text: trimmed === defaultText(surface).trim() ? "" : trimmed };
+  return {
+    enabled: rec.enabled,
+    text: trimmed === defaultText(surface).trim() ? "" : trimmed,
+    triggers: parseTriggers(rec.triggers, label, surface),
+  };
 }
 
 export function parsePublicSkill(raw: unknown): PublicSkillConfig {
@@ -108,23 +173,26 @@ export function publicSkillView(config: PublicSkillConfig) {
     enabled: config[surface].enabled,
     text: config[surface].text || defaultText(surface),
     isDefault: !config[surface].text,
+    triggers: config[surface].triggers,
   });
   return {
     frontend: view("frontend"),
     apikey: view("apikey"),
     defaults: { frontend: defaultText("frontend"), apikey: defaultText("apikey") },
+    defaultTriggers: { frontend: defaultTriggers("frontend"), apikey: defaultTriggers("apikey") },
     maxChars: PUBLIC_SKILL_MAX_CHARS,
   };
 }
 
-/** 这次请求要追加到 system 的公共 Skill；没有就返回 null。 */
+/** 这次请求要追加到 system 的公共 Skill；没开、没命中关键词或没有内容就返回 null。 */
 export function publicSkillText(
   config: PublicSkillConfig,
   surface: PublicSkillSurface,
-  state: { mcpEnabled: boolean },
+  state: { mcpEnabled: boolean; userText: string },
 ): string | null {
   const scope = config[surface];
   if (!scope.enabled) return null;
+  if (!publicSkillTriggered(scope, state.userText)) return null;
   const text = (scope.text || defaultText(surface)).trim();
   if (!text) return null;
   if (surface === "frontend" && !state.mcpEnabled) {

@@ -13,6 +13,7 @@ function fillSkills(status) {
 }
 
 let publicDefaults = { frontend: "", apikey: "" };
+let publicDefaultTriggers = { frontend: [], apikey: [] };
 
 function fillPublicSkill(view) {
   if (!view) return;
@@ -21,6 +22,9 @@ function fillPublicSkill(view) {
   document.getElementById("pub-frontend-text").value = view.frontend.text;
   document.getElementById("pub-apikey-enabled").checked = view.apikey.enabled;
   document.getElementById("pub-apikey-text").value = view.apikey.text;
+  publicDefaultTriggers = view.defaultTriggers || publicDefaultTriggers;
+  document.getElementById("pub-frontend-triggers").value = (view.frontend.triggers || []).join("\n");
+  document.getElementById("pub-apikey-triggers").value = (view.apikey.triggers || []).join("\n");
   document.getElementById("pub-frontend-text").maxLength = view.maxChars || 8000;
   document.getElementById("pub-apikey-text").maxLength = view.maxChars || 8000;
   document.getElementById("pub-hint").textContent = view.frontend.isDefault
@@ -33,10 +37,12 @@ async function savePublicSkill() {
     frontend: {
       enabled: document.getElementById("pub-frontend-enabled").checked,
       text: document.getElementById("pub-frontend-text").value,
+      triggers: domainLines("pub-frontend-triggers"),
     },
     apikey: {
       enabled: document.getElementById("pub-apikey-enabled").checked,
       text: document.getElementById("pub-apikey-text").value,
+      triggers: domainLines("pub-apikey-triggers"),
     },
   };
   fillPublicSkill(await api("/admin/api/public-skill", { method: "PUT", body: JSON.stringify(body) }));
@@ -44,6 +50,10 @@ async function savePublicSkill() {
 
 document.getElementById("pub-frontend-reset").onclick = () => {
   document.getElementById("pub-frontend-text").value = publicDefaults.frontend;
+};
+
+document.getElementById("pub-frontend-triggers-reset").onclick = () => {
+  document.getElementById("pub-frontend-triggers").value = publicDefaultTriggers.frontend.join("\n");
 };
 
 document.getElementById("pub-save").onclick = async () => {

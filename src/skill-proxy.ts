@@ -11,7 +11,7 @@ import {
 import { proxy } from "./proxy.ts";
 import { GatewayError, bodyTooLarge, corsHeaders } from "./lib.ts";
 import { loadMcpPolicy } from "./keys.ts";
-import { loadPublicSkill, publicSkillText } from "./public-skill.ts";
+import { loadPublicSkill, publicSkillText, publicSkillTriggered, recentUserText } from "./public-skill.ts";
 import { loadUserTools, resolveCaller } from "./user-tools.ts";
 import { appendSystemText } from "./user-skills.ts";
 
@@ -35,9 +35,11 @@ export async function proxySkills(
   try {
     if (caller) {
       const publicConfig = await loadPublicSkill(env.KEYS);
-      const needsPolicy = caller.surface === "frontend" && publicConfig.frontend.enabled;
+      const userText = recentUserText(body);
+      const scope = publicConfig[caller.surface];
+      const needsPolicy = caller.surface === "frontend" && scope.enabled && publicSkillTriggered(scope, userText);
       const mcpEnabled = needsPolicy ? (await loadMcpPolicy(env.KEYS)).enabled : true;
-      const text = publicSkillText(publicConfig, caller.surface, { mcpEnabled });
+      const text = publicSkillText(publicConfig, caller.surface, { mcpEnabled, userText });
       if (text) appendSystemText(body, rest, text);
     }
     const mine = new Set(injectHostedSkills(body, rest, enabled, user?.tools ?? []));

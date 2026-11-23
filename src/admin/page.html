@@ -106,9 +106,21 @@
           <div class="actions" style="justify-content:flex-start;margin-bottom:12px">
             <button type="button" class="ghost" id="pub-frontend-reset">恢复默认内容</button>
           </div>
+          <div class="field">
+            <label for="pub-frontend-triggers">前台触发关键词（一行一个，不分大小写）</label>
+            <textarea id="pub-frontend-triggers" rows="4" spellcheck="false" placeholder="留空 = 每次对话都注入"></textarea>
+            <p class="hint">最近 3 条用户消息里出现任意一个关键词，才把上面的提示塞进 system；没命中就不塞，不消耗 token。留空则每次都塞。</p>
+          </div>
+          <div class="actions" style="justify-content:flex-start;margin-bottom:12px">
+            <button type="button" class="ghost" id="pub-frontend-triggers-reset">恢复默认关键词</button>
+          </div>
           <label class="check"><input type="checkbox" id="pub-apikey-enabled" /> API Key（接口客户端）</label>
           <div class="field" style="margin-top:8px">
             <textarea id="pub-apikey-text" rows="4" spellcheck="false" placeholder="没有默认内容。需要给所有 API Key 调用统一加一段提示时再写。"></textarea>
+          </div>
+          <div class="field">
+            <label for="pub-apikey-triggers">API Key 触发关键词（一行一个）</label>
+            <textarea id="pub-apikey-triggers" rows="3" spellcheck="false" placeholder="留空 = 每次调用都注入"></textarea>
           </div>
           <p class="hint" id="pub-hint"></p>
           <p class="err" id="pub-err"></p>

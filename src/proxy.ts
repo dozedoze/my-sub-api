@@ -1,9 +1,12 @@
 import {
+  bytesToBase64,
   chatErrorToAnthropic,
   chatSseToAnthropic,
   chatToMessage,
   chatToolChoiceAny,
+  collectFileIds,
   DEEPSEEK_ANTHROPIC,
+  inlineFileIds,
   messagesTarget,
   messagesToChat,
   messagesToResponses,
@@ -11,6 +14,7 @@ import {
   prepareAnthropic,
   responsesSseToAnthropic,
   responsesToMessage,
+  type InlinedFile,
   type MessagesWire,
 } from "./anthropic";
 import { currentAuto, isAutoModel, planAuto } from "./auto";
@@ -161,6 +165,7 @@ async function proxyAfterGate(
   },
 ): Promise<Response> {
   const { issued, live, map, blocked, aliases, autoRoute, defaultProvider, board, hold } = ctxp;
+  const fileCache = new Map<string, InlinedFile>();
 
   if (isRawRest(rest)) {
     return rawUpstream(request, env, rest, { issued, live, map, blocked, board, hold });
@@ -228,6 +233,15 @@ async function proxyAfterGate(
     forwardedMessages = merged;
   }
 
+  let autoMessages = forwardedMessages ?? [];
+  if (isAutoModel(model) && rest === "messages" && payload && typeof payload === "object") {
+    const incoming = (payload as { messages?: unknown }).messages;
+    autoMessages = Array.isArray(incoming) ? (incoming as ChatMessage[]) : [];
+    if (sessionId) {
+      sessionStub ??= env.SESSIONS.get(env.SESSIONS.idFromName(`${issued.id}:${sessionId}`));
+    }
+  }
+
   let autoTierName: "easy" | "hard" | undefined;
   let autoVia: "pin" | "hint" | "model" | "fallback" | undefined;
   let modelChain: string[] | undefined;
@@ -236,7 +250,7 @@ async function proxyAfterGate(
     const plan = await planAuto({
       rest,
       route: autoRoute,
-      messages: forwardedMessages ?? [],
+      messages: autoMessages,
       session: sessionStub,
       providers: map,
       blocked,
@@ -314,9 +328,13 @@ async function proxyAfterGate(
         rest === "messages" && bodyRec ? messagesWire(account.baseUrl, picked.model, account.messages) : null;
       const target = wire ? messagesTarget(account.baseUrl, wire) : null;
       let outbound: unknown = payload;
-      if (wire === "chat" && bodyRec) outbound = messagesToChat(bodyRec, chatToolChoiceAny(account.baseUrl));
-      else if (wire === "responses" && bodyRec) outbound = messagesToResponses(bodyRec, account.baseUrl, account.hostedSearch);
-      else if (wire === "anthropic" && bodyRec) outbound = prepareAnthropic(account.baseUrl, bodyRec);
+      const ready =
+        rest === "messages" && bodyRec && wire
+          ? await filesForUpstream(bodyRec, account, live, blocked, fileCache)
+          : bodyRec;
+      if (wire === "chat" && ready) outbound = messagesToChat(ready, chatToolChoiceAny(account.baseUrl));
+      else if (wire === "responses" && ready) outbound = messagesToResponses(ready, account.baseUrl, account.hostedSearch);
+      else if (wire === "anthropic" && ready) outbound = prepareAnthropic(account.baseUrl, ready);
       const upstreamBase = target?.baseUrl ?? account.baseUrl;
       const upstreamRest = target?.rest ?? rest;
       const headers = new Headers();
@@ -658,6 +676,75 @@ function isDeepseek(p: Provider): boolean {
   } catch {
     return false;
   }
+}
+
+function deepseekAccount(live: Provider[], blocked: Set<string>): Provider | undefined {
+  return live.find((p) => !blocked.has(p.id) && isDeepseek(p));
+}
+
+/** DeepSeek 的 Files API 当仓库。非 DS 上游把 file_id 拉成 base64，再走该协议的图片/文档字段。 */
+async function filesForUpstream(
+  body: Record<string, unknown>,
+  account: Provider,
+  live: Provider[],
+  blocked: Set<string>,
+  cache: Map<string, InlinedFile>,
+): Promise<Record<string, unknown>> {
+  const ids = collectFileIds(body);
+  if (!ids.length || isDeepseek(account)) return body;
+  const store = deepseekAccount(live, blocked);
+  if (!store) {
+    throw new GatewayError(
+      400,
+      "invalid_request",
+      "file_id is not supported on this upstream; send base64 image or document sources",
+    );
+  }
+  const missing = ids.filter((id) => !cache.has(id));
+  await Promise.all(
+    missing.map(async (id) => {
+      try {
+        const file = await fetchDeepseekFile(store, id);
+        if (file) cache.set(id, file);
+      } catch {
+        /* 拉不到就当缺失，下面统一 400 */
+      }
+    }),
+  );
+  const unresolved = ids.filter((id) => !cache.has(id));
+  if (unresolved.length) {
+    throw new GatewayError(400, "invalid_request", `file_id cannot be used with this model: ${unresolved.join(", ")}`);
+  }
+  const files = new Map(ids.map((id) => [id, cache.get(id)!]));
+  return inlineFileIds(body, files);
+}
+
+async function fetchDeepseekFile(account: Provider, fileId: string): Promise<InlinedFile | null> {
+  const auth = { authorization: `Bearer ${account.apiKey}`, "x-api-key": account.apiKey };
+  const metaRes = await fetch(joinUrl(DEEPSEEK_ANTHROPIC, `files/${encodeURIComponent(fileId)}`), { headers: auth });
+  if (!metaRes.ok) return null;
+  const meta = (await metaRes.json().catch(() => null)) as {
+    mime_type?: unknown;
+    filename?: unknown;
+    size_bytes?: unknown;
+  } | null;
+  const size = typeof meta?.size_bytes === "number" ? meta.size_bytes : 0;
+  if (size > GATE.maxBodyBytes) return null;
+  const contentRes = await fetch(joinUrl(DEEPSEEK_ANTHROPIC, `files/${encodeURIComponent(fileId)}/content`), {
+    headers: auth,
+  });
+  if (!contentRes.ok) return null;
+  const bytes = new Uint8Array(await contentRes.arrayBuffer());
+  if (bytes.byteLength > GATE.maxBodyBytes) return null;
+  const mediaType =
+    typeof meta?.mime_type === "string" && meta.mime_type
+      ? meta.mime_type
+      : contentRes.headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream";
+  return {
+    mediaType,
+    data: bytesToBase64(bytes),
+    filename: typeof meta?.filename === "string" ? meta.filename : undefined,
+  };
 }
 
 async function rawUpstream(

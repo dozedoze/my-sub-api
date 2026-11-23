@@ -29,7 +29,9 @@ export default {
     try {
       return await handle(request, env, ctx);
     } catch (err) {
-      if (err instanceof GatewayError) return openaiError(err.status, err.code, err.message, request);
+      if (err instanceof GatewayError) {
+        return openaiError(err.status, err.code, err.message, request, err.retryAfter);
+      }
       console.error(JSON.stringify({ message: "unhandled", error: err instanceof Error ? err.message : String(err) }));
       return openaiError(500, "internal_error", "Internal server error", request);
     }
@@ -55,16 +57,6 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     return Response.redirect(new URL("/admin", url.origin).href, 302);
   }
   if (path.startsWith("/chat/api")) {
-    if (request.method === "POST" && path === "/chat/api/login") {
-      throwIfAdmitFailed(
-        await quotaBoard(env).admit(`login:${clientIp(request)}`, {
-          quota: 0,
-          maxRpm: GATE.anonRpm,
-          maxInflight: GATE.keyInflight,
-          takeInflight: false,
-        }),
-      );
-    }
     return chatApi(request, env, path);
   }
   if (path.startsWith("/admin/api")) {

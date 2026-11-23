@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   applyAdmit,
+  applyLoginFail,
+  applyLoginOk,
   applyRelease,
   pushRecent,
   trimSessionMessages,
@@ -10,7 +12,7 @@ import {
 } from "./lib";
 
 function meterName(id: string): string {
-  return id.startsWith("anon:") || id.startsWith("admin:") ? `g:${id}` : `k:${id}`;
+  return id.startsWith("anon:") || id.startsWith("admin:") || id.startsWith("login:") ? `g:${id}` : `k:${id}`;
 }
 
 export class ChatSession extends DurableObject<Env> {
@@ -53,7 +55,23 @@ export class QuotaBoard extends DurableObject<Env> {
   }
 
   async peek(keyId: string): Promise<Meter> {
-    return (await this.ctx.storage.get<Meter>(meterName(keyId))) ?? { used: 0, requests: 0 };
+    const empty: Meter = { used: 0, requests: 0 };
+    const cur = await this.ctx.storage.get<Meter>(meterName(keyId));
+    if (cur) return cur;
+    if (keyId.startsWith("login:")) {
+      return (await this.ctx.storage.get<Meter>(`k:${keyId}`)) ?? empty;
+    }
+    return empty;
+  }
+
+  async noteLoginFail(id: string): Promise<Meter> {
+    const next = applyLoginFail(await this.peek(id), Date.now());
+    await this.ctx.storage.put(meterName(id), next);
+    return next;
+  }
+
+  async noteLoginOk(id: string): Promise<void> {
+    await this.ctx.storage.put(meterName(id), applyLoginOk(await this.peek(id)));
   }
 
   async admit(

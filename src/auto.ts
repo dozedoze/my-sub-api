@@ -380,8 +380,12 @@ export async function planAuto(opts: {
   defaultProvider: string;
   charge(providerId: string, tokens: number): Promise<unknown>;
 }): Promise<AutoPlan> {
-  if (opts.rest !== "chat/completions") {
-    throw new GatewayError(400, "invalid_request", "Model 'auto' is only supported on /v1/chat/completions");
+  if (opts.rest !== "chat/completions" && opts.rest !== "messages") {
+    throw new GatewayError(
+      400,
+      "invalid_request",
+      "Model 'auto' is only supported on /v1/chat/completions and /v1/messages",
+    );
   }
   const route = opts.route ?? DEFAULT_AUTO_ROUTE;
   const pinned = opts.session ? await opts.session.loadAuto() : null;

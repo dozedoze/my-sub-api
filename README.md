@@ -17,6 +17,7 @@ WorkBuddy / OpenCode / Cursor
 ## 它做什么
 
 - OpenAI 兼容：`POST /v1/chat/completions`（含流式）、`GET /v1/models`，以及透传 `/v1/responses`、`/v1/messages`、`/v1/embeddings`
+- 聊天页登录：`POST /chat/api/login` 按 IP 限速，连续失败会锁一段时间；`GET /chat/api/usage` 返回当前账号已用 / 额度 / 百分比
 - 管理后台 `/admin`：用 `ADMIN_TOKEN` 登录，签发 / 吊销 / 删除使用者 Key，看每人用量和额度
 - 使用者 Key 只在创建时显示一次；KV 里存 SHA-256，明文不落盘
 - 模型可写成 `opencode/glm-5.2` 或 `cursor/composer-2.5` 来选上游；Key 也可锁死到某一个上游
@@ -93,7 +94,7 @@ npx wrangler secret put OPENCODE_API_KEY
 | API Key | `sk-...` |
 | 模型 | `auto`，或上游真实 ID，或 `opencode/<模型>` |
 
-`auto` 只用于 `POST /v1/chat/completions`，按日常使用来分。寒暄、翻译、润色、摘要、解释，以及一眼能定的简单请求，直接走便宜模型。排错、证明、用户在纠正上一轮，直接走难档。其余把最近几轮原文（不含客户端塞来的 system 人设）交给分档模型，只让它回答 `easy` 或 `hard`，拿不准算 easy。分档不使用对外的 easy 名字，按 `qwen3.8-flash`、同套餐的 `qwen3.7-plus`、再 `deepseek-chat` 的顺序，跳过套餐用满或余额为 0 的账号；都问失败才看本地规则，默认 easy，只有对话里已经是堆栈才算 hard。短跟进（继续、改一下、为什么）沿用上一档；换了一件明确的易事可以降回来。日常回答先用后台配的简单档，没配就用内置的 `opencode/qwen3.8-flash`；它没钱或没有这个模型时按同一条便宜链换。复杂档按后台配的顺序从前往后试，没配就用内置顺序，前面的限流、鉴权失败、没有这个模型、套餐用满或 5xx 才换下一个，并钉住这次成功的那个难模型。分档花掉的 token 记在这把 Key 上。响应头 `x-auto-tier` 是这次的档。锁死到某一个上游的 Key，链上不属于它的模型会被跳过。
+`auto` 用于 `POST /v1/chat/completions` 和 `POST /v1/messages`（含 `/anthropic/v1/skill/messages`），按日常使用来分。寒暄、翻译、润色、摘要、解释，以及一眼能定的简单请求，直接走便宜模型。排错、证明、用户在纠正上一轮，直接走难档。其余把最近几轮原文（不含客户端塞来的 system 人设）交给分档模型，只让它回答 `easy` 或 `hard`，拿不准算 easy。分档不使用对外的 easy 名字，按 `qwen3.8-flash`、同套餐的 `qwen3.7-plus`、再 `deepseek-chat` 的顺序，跳过套餐用满或余额为 0 的账号；都问失败才看本地规则，默认 easy，只有对话里已经是堆栈才算 hard。短跟进（继续、改一下、为什么）沿用上一档；换了一件明确的易事可以降回来。日常回答先用后台配的简单档，没配就用内置的 `opencode/qwen3.8-flash`；它没钱或没有这个模型时按同一条便宜链换。复杂档按后台配的顺序从前往后试，没配就用内置顺序，前面的限流、鉴权失败、没有这个模型、套餐用满或 5xx 才换下一个，并钉住这次成功的那个难模型。分档花掉的 token 记在这把 Key 上。响应头 `x-auto-tier` 是这次的档。锁死到某一个上游的 Key，链上不属于它的模型会被跳过。
 
 ### WorkBuddy
 
@@ -146,7 +147,11 @@ Settings → Models → 打开 Override OpenAI Base URL → 填 `https://<worker
    - OpenAI：`prompt_cache_key`
    - Anthropic `/v1/messages`：顶层 `cache_control: { type: "ephemeral" }`
 
-同一把 Key 开两个窗口且都不带头时，会共用默认会话。要隔离就让客户端加 `x-session-id`。
+同一把 Key 开两个窗口且都不带头时，会共用默认会话。要隔离就让客户端加 `x-session-id`。chat 前端每条补全都会带上当前对话的 `x-session-id`。
+
+## 文件
+
+`POST /anthropic/v1/files` 仍按 DeepSeek Files API 存（Anthropic 形状的 `file_id`）。发到 DeepSeek 时 `file_id` 原样转发。发到 Grok / OpenAI 等 chat 或 responses 上游时，中转会把 `file_id` 拉成 base64，再写成该协议的图片字段（`image_url` / `input_image`）。没有 DeepSeek 上游、或文件拉不下来时返回 400，让客户端改走 base64。chat 前端现在默认把附件内联成 base64，不依赖这条 Files API。
 
 ## 额度与用量
 

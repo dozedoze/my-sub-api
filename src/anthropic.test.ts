@@ -4,6 +4,8 @@ import {
   chatErrorToAnthropic,
   chatSseToAnthropic,
   chatToMessage,
+  collectFileIds,
+  inlineFileIds,
   messagesTarget,
   messagesToChat,
   messagesToResponses,
@@ -100,6 +102,68 @@ test("messagesWire follows the upstream protocol", () => {
       prepareAnthropic("https://opencode.ai/zen/go/v1", { thinking: { type: "enabled" }, output_config: { effort: "high" } }),
     false,
   );
+});
+
+test("messagesToChat folds latest_reminder and keeps images", () => {
+  const chat = messagesToChat({
+    model: "auto",
+    system: "You are a helpful assistant.",
+    messages: [
+      { role: "latest_reminder", content: "2026-11-23,Monday,Web,zh-CN" },
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "QQ==" } },
+          { type: "text", text: "这是什么" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(chat.messages, [
+    { role: "system", content: "You are a helpful assistant.\n2026-11-23,Monday,Web,zh-CN" },
+    {
+      role: "user",
+      content: [
+        { type: "image_url", image_url: { url: "data:image/png;base64,QQ==" } },
+        { type: "text", text: "这是什么" },
+      ],
+    },
+  ]);
+  const responses = messagesToResponses(
+    {
+      model: "grok-4.7",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "QQ==" } }],
+        },
+      ],
+    },
+    "https://api.x.ai/v1",
+  );
+  assert.deepEqual(responses.input, [
+    {
+      role: "user",
+      content: [{ type: "input_image", image_url: "data:image/png;base64,QQ==" }],
+    },
+  ]);
+  const native = prepareAnthropic("https://opencode.ai/zen/go/v1", {
+    model: "qwen3.8-flash",
+    system: "sys",
+    messages: [
+      { role: "latest_reminder", content: "today" },
+      { role: "user", content: "hi" },
+    ],
+  });
+  assert.equal(native.system, "sys\ntoday");
+  assert.deepEqual(native.messages, [{ role: "user", content: "hi" }]);
+  const deepseek = prepareAnthropic("https://api.deepseek.com/v1", {
+    messages: [
+      { role: "latest_reminder", content: "today" },
+      { role: "user", content: "hi" },
+    ],
+  });
+  assert.equal((deepseek.messages as { role: string }[])[0].role, "latest_reminder");
 });
 
 test("messagesToChat rewrites tools and tool results", () => {
@@ -509,4 +573,43 @@ test("responses sse becomes anthropic events", async () => {
     "message_delta",
     "message_stop",
   ]);
+});
+
+test("file_id is inlined to base64 then converted for chat and grok", () => {
+  const body = {
+    model: "grok-4.7",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "file", file_id: "file-api-1" } },
+          { type: "text", text: "what" },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(collectFileIds(body), ["file-api-1"]);
+  const inlined = inlineFileIds(body, new Map([["file-api-1", { mediaType: "image/png", data: "QQ==", filename: "a.png" }]]));
+  const chat = messagesToChat(inlined);
+  assert.deepEqual(chat.messages, [
+    {
+      role: "user",
+      content: [
+        { type: "image_url", image_url: { url: "data:image/png;base64,QQ==" } },
+        { type: "text", text: "what" },
+      ],
+    },
+  ]);
+  const responses = messagesToResponses(inlined, "https://api.x.ai/v1");
+  assert.deepEqual(responses.input, [
+    {
+      role: "user",
+      content: [
+        { type: "input_image", image_url: "data:image/png;base64,QQ==" },
+        { type: "input_text", text: "what" },
+      ],
+    },
+  ]);
+  const dropped = messagesToChat(body);
+  assert.deepEqual(dropped.messages, [{ role: "user", content: "what" }]);
 });

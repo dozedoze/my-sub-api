@@ -1,11 +1,13 @@
 export class GatewayError extends Error {
   status: number;
   code: string;
-  constructor(status: number, code: string, message: string) {
+  retryAfter?: number;
+  constructor(status: number, code: string, message: string, retryAfter?: number) {
     super(message);
     this.name = "GatewayError";
     this.status = status;
     this.code = code;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -92,6 +94,10 @@ export type Meter = {
   rpm?: number;
   inflight?: number;
   gateAt?: number;
+  /** 登录失败次数；只写在 login: IP 计量上。 */
+  fails?: number;
+  /** 登录锁定到期时间。 */
+  lockedUntil?: number;
 };
 
 /** 给自己几个人用：挡住脚本刷，不挡 Cursor / Claude Code 多窗口连打。 */
@@ -101,6 +107,11 @@ export const GATE = {
   keyRpm: 480,
   keyInflight: 32,
   anonRpm: 60,
+  /** 聊天页登录：每 IP 每分钟最多试几次。 */
+  loginRpm: 8,
+  /** 连续失败几次后锁 15 分钟。 */
+  loginFails: 5,
+  loginLockMs: 15 * 60_000,
   /** 只拦没登录成功的撞库，登录后不限。 */
   adminRpm: 40,
   maxBodyBytes: 8_000_000,
@@ -110,7 +121,7 @@ export const GATE = {
   imageTokenFloor: 8_000,
 } as const;
 
-export type AdmitFail = { ok: false; status: number; code: string; message: string };
+export type AdmitFail = { ok: false; status: number; code: string; message: string; retryAfter?: number };
 export type AdmitHit = { ok: true; next: Meter } | AdmitFail;
 
 export function applyAdmit(
@@ -135,7 +146,14 @@ export function applyAdmit(
     };
   }
   if (rpm >= opts.maxRpm) {
-    return { ok: false, status: 429, code: "rate_limited", message: `Too many requests (${opts.maxRpm}/min)` };
+    const retryAfter = Math.max(1, Math.ceil((GATE.windowMs - (now - rpmAt)) / 1000));
+    return {
+      ok: false,
+      status: 429,
+      code: "rate_limited",
+      message: `Too many requests (${opts.maxRpm}/min)`,
+      retryAfter,
+    };
   }
   if (opts.takeInflight && inflight >= opts.maxInflight) {
     return {
@@ -183,7 +201,29 @@ export function chargeEstimate(rest: string, payload: unknown): number {
 }
 
 export function throwIfAdmitFailed(hit: { ok: true } | AdmitFail): asserts hit is { ok: true } {
-  if (!hit.ok) throw new GatewayError(hit.status, hit.code, hit.message);
+  if (!hit.ok) throw new GatewayError(hit.status, hit.code, hit.message, hit.retryAfter);
+}
+
+export function loginRetryAfter(cur: Meter, now: number): number | null {
+  if (cur.lockedUntil && cur.lockedUntil > now) {
+    return Math.max(1, Math.ceil((cur.lockedUntil - now) / 1000));
+  }
+  return null;
+}
+
+export function applyLoginFail(cur: Meter, now: number): Meter {
+  const unlocked = !cur.lockedUntil || cur.lockedUntil <= now;
+  const prev = unlocked && cur.lockedUntil ? 0 : (cur.fails ?? 0);
+  const fails = prev + 1;
+  return {
+    ...cur,
+    fails,
+    lockedUntil: fails >= GATE.loginFails ? now + GATE.loginLockMs : undefined,
+  };
+}
+
+export function applyLoginOk(cur: Meter): Meter {
+  return { ...cur, fails: 0, lockedUntil: undefined };
 }
 
 export const RECENT_CALL_LIMIT = 10;
@@ -1146,10 +1186,25 @@ export async function timingSafeEqualString(a: string, b: string): Promise<boole
   return sameBytes && aa.length === bb.length;
 }
 
-export function openaiError(status: number, code: string, message: string, request?: Request): Response {
+export function openaiError(
+  status: number,
+  code: string,
+  message: string,
+  request?: Request,
+  retryAfter?: number,
+): Response {
+  const headers = new Headers(corsHeaders(request));
+  if (retryAfter && retryAfter > 0) headers.set("retry-after", String(retryAfter));
   return Response.json(
-    { error: { message, type: status === 401 ? "invalid_request_error" : "api_error", code } },
-    { status, headers: corsHeaders(request) },
+    {
+      error: {
+        message,
+        type: status === 401 ? "invalid_request_error" : "api_error",
+        code,
+        ...(retryAfter && retryAfter > 0 ? { retry_after: retryAfter } : {}),
+      },
+    },
+    { status, headers },
   );
 }
 

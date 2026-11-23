@@ -8,6 +8,8 @@ import {
   applyChatSseLine,
   assistantFromChatCompletion,
   applyAdmit,
+  applyLoginFail,
+  applyLoginOk,
   applyRelease,
   attachUsage,
   bodyTooLarge,
@@ -46,6 +48,7 @@ import {
   modelAllowed,
   isGoSubscription,
   loadProviders,
+  loginRetryAfter,
   mintAdminSession,
   isAdminShellPath,
   readCookie,
@@ -87,6 +90,7 @@ import {
   DEFAULT_AUTO_ROUTE,
   isAutoModel,
   parseAutoRouterReply,
+  planAuto,
   stickAutoTier,
 } from "./auto.ts";
 
@@ -463,6 +467,12 @@ test("auto route asks the cheap model except for a bare greeting", () => {
   assert.equal(autoRouterFallback("x".repeat(500)), "easy");
   assert.equal(autoRouterFallback("Traceback (most recent call last):"), "hard");
   assert.equal(autoRouterFallback("今天星期几"), "easy");
+  assert.equal(
+    autoRouteHint([
+      { role: "user", content: [{ type: "image", source: { type: "base64", data: "xx" } }] },
+    ]),
+    "ask",
+  );
   assert.equal(stickAutoTier("easy", "hard", true), "hard");
   assert.equal(stickAutoTier("hard", "easy", true), "hard");
   assert.equal(stickAutoTier("hard", "easy", false), "easy");
@@ -493,6 +503,29 @@ test("auto route asks the cheap model except for a bare greeting", () => {
   assert.equal(modelFallback(429), true);
   assert.equal(modelFallback(404), true);
   assert.equal(modelFallback(400), false);
+});
+
+test("auto plans chat completions and anthropic messages", async () => {
+  const map = new Map<string, Provider>([
+    ["opencode", { id: "opencode", baseUrl: "https://opencode.ai/zen/go/v1", apiKey: "k" }],
+  ]);
+  const opts = {
+    route: DEFAULT_AUTO_ROUTE,
+    messages: [{ role: "user", content: "你好" }],
+    providers: map,
+    blocked: new Set<string>(),
+    aliases: {},
+    defaultProvider: "opencode",
+    charge: async () => ({}),
+  };
+  const chat = await planAuto({ ...opts, rest: "chat/completions" });
+  assert.equal(chat.tier, "easy");
+  const messages = await planAuto({ ...opts, rest: "messages" });
+  assert.equal(messages.tier, "easy");
+  await assert.rejects(
+    () => planAuto({ ...opts, rest: "responses" }),
+    (err: unknown) => err instanceof GatewayError && err.status === 400,
+  );
 });
 
 test("pickUpstream skips blacklisted upstreams", () => {
@@ -853,6 +886,7 @@ test("admit gate blocks rpm and inflight, not a few sequential calls", () => {
   assert.equal(r3.ok, false);
   if (r3.ok) return;
   assert.match(r3.message, /\/min/);
+  assert.equal(typeof r3.retryAfter, "number");
   const r4 = applyAdmit(r2.next, now + GATE.windowMs, rpmOpts);
   assert.equal(r4.ok, true);
 
@@ -895,4 +929,22 @@ test("admin shell paths are not API", () => {
   assert.equal(isAdminShellPath("/admin/api/status"), false);
   assert.equal(isAdminShellPath("/administration"), false);
   assert.equal(isAdminShellPath("/"), false);
+});
+
+test("login fails lock after GATE.loginFails", () => {
+  const now = 2_000_000;
+  let cur = { used: 0, requests: 0 };
+  for (let i = 0; i < GATE.loginFails - 1; i++) {
+    cur = applyLoginFail(cur, now);
+    assert.equal(loginRetryAfter(cur, now), null);
+  }
+  cur = applyLoginFail(cur, now);
+  assert.equal(loginRetryAfter(cur, now), Math.ceil(GATE.loginLockMs / 1000));
+  assert.equal(loginRetryAfter(cur, now + GATE.loginLockMs + 1), null);
+  const afterExpiry = applyLoginFail(cur, now + GATE.loginLockMs + 1);
+  assert.equal(afterExpiry.fails, 1);
+  assert.equal(loginRetryAfter(afterExpiry, now + GATE.loginLockMs + 1), null);
+  const cleared = applyLoginOk(cur);
+  assert.equal(cleared.fails, 0);
+  assert.equal(loginRetryAfter(cleared, now), null);
 });

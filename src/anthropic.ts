@@ -124,11 +124,11 @@ function anthropicOfficial(baseUrl: string): boolean {
 }
 
 export function prepareAnthropic(baseUrl: string, body: Record<string, unknown>): Record<string, unknown> {
-  if (anthropicOfficial(baseUrl)) return body;
+  if (anthropicOfficial(baseUrl)) return withoutChatExtensions(body);
   const host = hostOf(baseUrl);
   const deepseek = host === "deepseek.com" || host.endsWith(".deepseek.com");
   const opencode = opencodeHost(host);
-  let next = relaxToolChoice(body);
+  let next = relaxToolChoice(deepseek ? body : withoutChatExtensions(body));
   if (opencode || deepseek) {
     const { output_config: _oc, context_management: _cm, ...rest } = next;
     next = rest;
@@ -177,6 +177,123 @@ function imagePart(block: Record<string, unknown>): { type: "image_url"; image_u
   return null;
 }
 
+export type InlinedFile = { mediaType: string; data: string; filename?: string };
+
+export function collectFileIds(payload: unknown): string[] {
+  const ids = new Set<string>();
+  const rec = asRecord(payload);
+  const messages = rec && Array.isArray(rec.messages) ? rec.messages : [];
+  for (const message of messages) {
+    const content = asRecord(message)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const source = asRecord(asRecord(block)?.source);
+      if (source?.type === "file" && typeof source.file_id === "string" && source.file_id.trim()) {
+        ids.add(source.file_id.trim());
+      }
+    }
+  }
+  return [...ids];
+}
+
+function rewriteFileSource(source: Record<string, unknown>, files: Map<string, InlinedFile>): Record<string, unknown> {
+  if (source.type !== "file" || typeof source.file_id !== "string") return source;
+  const file = files.get(source.file_id.trim());
+  if (!file) return source;
+  return {
+    type: "base64",
+    media_type: file.mediaType,
+    data: file.data,
+    ...(file.filename ? { filename: file.filename } : {}),
+  };
+}
+
+/** DeepSeek Files API 的 file_id 只有 DS 认识。转 chat/responses 或其它 anthropic 上游前，换成 base64。 */
+export function inlineFileIds(payload: Record<string, unknown>, files: Map<string, InlinedFile>): Record<string, unknown> {
+  if (!files.size || !Array.isArray(payload.messages)) return payload;
+  const messages = payload.messages.map((message) => {
+    const rec = asRecord(message);
+    if (!rec || !Array.isArray(rec.content)) return message;
+    const content = rec.content.map((block) => {
+      const item = asRecord(block);
+      const source = asRecord(item?.source);
+      if (!item || !source) return block;
+      const next = rewriteFileSource(source, files);
+      return next === source ? block : { ...item, source: next };
+    });
+    return { ...rec, content };
+  });
+  return { ...payload, messages };
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function latestReminder(messages: unknown): string {
+  let last = "";
+  if (!Array.isArray(messages)) return last;
+  for (const message of messages) {
+    const rec = asRecord(message);
+    if (rec?.role === "latest_reminder" && typeof rec.content === "string" && rec.content.trim()) {
+      last = rec.content.trim();
+    }
+  }
+  return last;
+}
+
+function clientMessages(messages: unknown): unknown[] {
+  if (!Array.isArray(messages)) return [];
+  return messages.filter((message) => {
+    const rec = asRecord(message);
+    return rec?.role === "user" || rec?.role === "assistant";
+  });
+}
+
+function mergeSystem(system: unknown, extra: string): unknown {
+  if (!extra) return system;
+  if (typeof system === "string") return system ? `${system}\n${extra}` : extra;
+  if (Array.isArray(system)) return [...system, { type: "text", text: extra }];
+  return extra;
+}
+
+/** Chat Engine 的 latest_reminder 只有 DeepSeek 认识。其余上游并进 system，并丢掉未知角色。 */
+function withoutChatExtensions(body: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(body.messages)) return body;
+  const reminder = latestReminder(body.messages);
+  const messages = clientMessages(body.messages);
+  if (messages.length === body.messages.length && !reminder) return body;
+  return { ...body, messages, system: mergeSystem(body.system, reminder) };
+}
+
+function decodeBase64Text(data: string): string {
+  try {
+    const bin = atob(data);
+    const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return "";
+  }
+}
+
+function documentText(block: Record<string, unknown>): string {
+  const source = asRecord(block.source);
+  if (!source) return "";
+  if (source.type === "base64" && typeof source.data === "string") {
+    const media = typeof source.media_type === "string" ? source.media_type : "";
+    if (media.startsWith("text/") || media === "application/json" || media === "application/xml") {
+      return decodeBase64Text(source.data);
+    }
+  }
+  const name = typeof source.filename === "string" && source.filename ? source.filename : "document";
+  return `[attached ${name}]`;
+}
+
 function userMessages(content: unknown): ChatMsg[] {
   if (typeof content === "string") return [{ role: "user", content }];
   if (!Array.isArray(content)) return [{ role: "user", content: textOf(content) }];
@@ -199,6 +316,11 @@ function userMessages(content: unknown): ChatMsg[] {
     if (rec.type === "image") {
       const img = imagePart(rec);
       if (img) parts.push(img);
+      continue;
+    }
+    if (rec.type === "document") {
+      const text = documentText(rec);
+      if (text) parts.push({ type: "text", text });
       continue;
     }
     if (rec.type === "text") parts.push({ type: "text", text: typeof rec.text === "string" ? rec.text : "" });
@@ -283,18 +405,19 @@ export function messagesToChat(
   body: Record<string, unknown>,
   anyToolChoice: "required" | "auto" = "required",
 ): Record<string, unknown> {
+  const cleaned = withoutChatExtensions(body);
   const messages: ChatMsg[] = [];
-  const system = textOf(body.system);
+  const system = textOf(cleaned.system);
   if (system) messages.push({ role: "system", content: system });
-  if (Array.isArray(body.messages)) {
-    for (const message of body.messages) {
+  if (Array.isArray(cleaned.messages)) {
+    for (const message of cleaned.messages) {
       const rec = asRecord(message);
       if (!rec) continue;
       if (rec.role === "assistant") messages.push(...assistantMessage(rec.content));
       else if (rec.role === "user") messages.push(...userMessages(rec.content));
     }
   }
-  const out: Record<string, unknown> = { model: body.model, messages };
+  const out: Record<string, unknown> = { model: cleaned.model, messages };
   if (typeof body.max_tokens === "number") out.max_tokens = body.max_tokens;
   if (body.stream === true) {
     out.stream = true;
@@ -452,12 +575,34 @@ function thinkingText(items: Record<string, unknown>[]): string {
   return " ";
 }
 
+function responsesUserContent(content: unknown): Record<string, unknown>[] {
+  const parts: Record<string, unknown>[] = [];
+  if (typeof content === "string") {
+    if (content) parts.push({ type: "input_text", text: content });
+    return parts;
+  }
+  if (!Array.isArray(content)) return parts;
+  for (const item of content) {
+    const rec = asRecord(item);
+    if (!rec) continue;
+    if (rec.type === "text" && typeof rec.text === "string" && rec.text) {
+      parts.push({ type: "input_text", text: rec.text });
+    }
+    if (rec.type === "image_url") {
+      const url = asRecord(rec.image_url)?.url;
+      if (typeof url === "string" && url) parts.push({ type: "input_image", image_url: url });
+    }
+  }
+  return parts;
+}
+
 export function messagesToResponses(body: Record<string, unknown>, baseUrl = "", hostedSearch?: boolean): Record<string, unknown> {
+  const cleaned = withoutChatExtensions(body);
   const input: Record<string, unknown>[] = [];
-  const system = textOf(body.system);
+  const system = textOf(cleaned.system);
   if (system) input.push({ role: "system", content: system });
-  if (Array.isArray(body.messages)) {
-    for (const message of body.messages) {
+  if (Array.isArray(cleaned.messages)) {
+    for (const message of cleaned.messages) {
       const rec = asRecord(message);
       if (!rec) continue;
       if (rec.role === "assistant") {
@@ -487,13 +632,17 @@ export function messagesToResponses(body: Record<string, unknown>, baseUrl = "",
           });
           continue;
         }
-        const text = typeof part.content === "string" ? part.content : textOf(part.content);
-        if (text) input.push({ role: "user", content: text });
+        if (typeof part.content === "string") {
+          if (part.content) input.push({ role: "user", content: part.content });
+          continue;
+        }
+        const content = responsesUserContent(part.content);
+        if (content.length) input.push({ role: "user", content });
       }
     }
   }
   const out: Record<string, unknown> = {
-    model: body.model,
+    model: cleaned.model,
     input,
     store: false,
     include: ["reasoning.encrypted_content"],

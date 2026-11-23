@@ -17,7 +17,14 @@ import {
   type InlinedFile,
   type MessagesWire,
 } from "./anthropic";
-import { currentAuto, isAutoModel, planAuto } from "./auto";
+import { currentAuto, isAutoModel, planAuto, type AutoVia } from "./auto";
+import {
+  shapeAnthropicThinking,
+  shapeResponsesThinking,
+  thinkingIntent,
+  thinkingMode,
+  type ThinkingMode,
+} from "./thinking";
 import { quotaBoard, type ChatSession, type QuotaBoard } from "./durable";
 import { sessionUser } from "./chat-api";
 import { banUpstream, loadUpstreamBans, lookupByPlaintext } from "./keys";
@@ -243,7 +250,7 @@ async function proxyAfterGate(
   }
 
   let autoTierName: "easy" | "hard" | undefined;
-  let autoVia: "pin" | "hint" | "model" | "fallback" | undefined;
+  let autoVia: AutoVia | undefined;
   let modelChain: string[] | undefined;
   let pinnedHard: string | null = null;
   if (isAutoModel(model)) {
@@ -257,6 +264,7 @@ async function proxyAfterGate(
       aliases,
       keyProvider: issued.provider,
       defaultProvider,
+      thinking: rest === "messages" ? thinkingIntent(payload) : null,
       charge: (providerId, tokens) => board.add(issued.id, providerId, tokens),
     });
     autoTierName = plan.tier;
@@ -332,9 +340,17 @@ async function proxyAfterGate(
         rest === "messages" && bodyRec && wire
           ? await filesForUpstream(bodyRec, account, live, blocked, fileCache)
           : bodyRec;
+      const mode: ThinkingMode = wire ? thinkingMode(picked.model, wire) : "unknown";
       if (wire === "chat" && ready) outbound = messagesToChat(ready, chatToolChoiceAny(account.baseUrl));
-      else if (wire === "responses" && ready) outbound = messagesToResponses(ready, account.baseUrl, account.hostedSearch);
-      else if (wire === "anthropic" && ready) outbound = prepareAnthropic(account.baseUrl, ready);
+      else if (wire === "responses" && ready) {
+        outbound = shapeResponsesThinking(
+          ready,
+          messagesToResponses(ready, account.baseUrl, account.hostedSearch),
+          mode,
+        );
+      } else if (wire === "anthropic" && ready) {
+        outbound = prepareAnthropic(account.baseUrl, shapeAnthropicThinking(ready, mode));
+      }
       const upstreamBase = target?.baseUrl ?? account.baseUrl;
       const upstreamRest = target?.rest ?? rest;
       const headers = new Headers();
@@ -461,6 +477,19 @@ async function fetchGroupModels(members: Provider[]): Promise<string[]> {
   return [];
 }
 
+/** auto 的开关意义是「走复杂档」，所以单独标出来。其余按上游和模型名认。 */
+function listedThinking(
+  model: { id: string; owned_by: string },
+  heads: Map<string, Provider>,
+): ThinkingMode | "auto" {
+  if (model.id === "auto") return "auto";
+  const head = heads.get(model.owned_by);
+  if (!head) return "unknown";
+  const prefix = `${model.owned_by}/`;
+  const bare = model.id.startsWith(prefix) ? model.id.slice(prefix.length) : model.id;
+  return thinkingMode(bare, messagesWire(head.baseUrl, bare, head.messages));
+}
+
 async function listModels(
   providers: Provider[],
   includeAuto: boolean,
@@ -470,7 +499,11 @@ async function listModels(
   const groups = await Promise.all(
     vendorGroups(providers).map(async (g) => ({ providerId: g.id, models: await fetchGroupModels(g.members) })),
   );
-  const listed = includeAuto ? exposeAutoModel(exposeModels(groups)) : exposeModels(groups);
+  const heads = new Map(vendorGroups(providers).map((g) => [g.id, g.members[0]]));
+  const listed = (includeAuto ? exposeAutoModel(exposeModels(groups)) : exposeModels(groups)).map((m) => ({
+    ...m,
+    thinking: listedThinking(m, heads),
+  }));
   if (rest.startsWith("models/")) {
     const want = decodeURIComponent(rest.slice("models/".length));
     const found = matchListedModel(listed, want);

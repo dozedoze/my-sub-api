@@ -14,10 +14,11 @@ import {
   type Provider,
 } from "./lib.ts";
 import { loadAutoModels } from "./keys.ts";
+import { preferThinkers, specThinkingMode, thinkingRank, type ThinkingIntent } from "./thinking.ts";
 
 export type AutoRoute = { easy: string; hard: string[] };
 export type AutoTier = "easy" | "hard";
-export type AutoVia = "pin" | "hint" | "model" | "fallback";
+export type AutoVia = "pin" | "hint" | "model" | "fallback" | "think";
 
 export type AutoPlan = {
   tier: AutoTier;
@@ -378,6 +379,8 @@ export async function planAuto(opts: {
   aliases: Record<string, string>;
   keyProvider?: string;
   defaultProvider: string;
+  /** 用户在前端明确开了深度思考。关闭不改档位，只让具体模型按能力关掉思考。 */
+  thinking?: ThinkingIntent | null;
   charge(providerId: string, tokens: number): Promise<unknown>;
 }): Promise<AutoPlan> {
   if (opts.rest !== "chat/completions" && opts.rest !== "messages") {
@@ -393,7 +396,10 @@ export async function planAuto(opts: {
   const followUp = autoRouteFollowUp(opts.messages);
   let next: AutoTier;
   let via: AutoVia;
-  if (pinned && followUp && hinted !== "hard") {
+  if (opts.thinking === "on") {
+    next = "hard";
+    via = "think";
+  } else if (pinned && followUp && hinted !== "hard") {
     next = pinned;
     via = "pin";
   } else if (hinted === "easy" || hinted === "hard") {
@@ -408,8 +414,15 @@ export async function planAuto(opts: {
   const tier = stickAutoTier(pinned, next, followUp);
   if (opts.session && tier !== pinned) await opts.session.saveAuto(tier);
   if (tier === "hard") {
-    const pinnedHard = opts.session ? await opts.session.loadAutoModel() : null;
-    return { tier, via, chain: orderAutoTargets(route.hard, pinnedHard) };
+    let pinnedHard = opts.session ? await opts.session.loadAutoModel() : null;
+    let chain = route.hard;
+    if (opts.thinking === "on") {
+      const modeOf = (spec: string) => specThinkingMode(spec, opts.providers, opts.defaultProvider);
+      chain = preferThinkers(chain, modeOf);
+      // 钉住的模型不是推理模型就不再钉，否则开了深度思考还落在它身上。
+      if (pinnedHard && thinkingRank(modeOf(pinnedHard)) > 0) pinnedHard = null;
+    }
+    return { tier, via, chain: orderAutoTargets(chain, pinnedHard) };
   }
   return { tier, via, chain: easyServeChain(route.easy, opts.providers.keys()) };
 }

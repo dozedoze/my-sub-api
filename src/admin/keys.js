@@ -1,3 +1,6 @@
+let keyFilter = "all";
+let keyQuery = "";
+
 function asKeyView(k) {
   const quota = typeof k.quotaTokens === "number" ? k.quotaTokens : defaultQuota;
   const used = k.usedTokens || 0;
@@ -15,6 +18,64 @@ function asKeyView(k) {
     remainingTokens: quota === 0 ? null : Math.max(0, quota - used),
     recent: Array.isArray(k.recent) ? k.recent : [],
   };
+}
+
+function isChatKey(k) {
+  return Boolean(k.username);
+}
+
+function visibleKeys(keys) {
+  const q = keyQuery.trim().toLowerCase();
+  return keys.filter((k) => {
+    if (goneIds.has(k.id)) return false;
+    if (keyFilter === "chat" && !isChatKey(k)) return false;
+    if (keyFilter === "key" && isChatKey(k)) return false;
+    if (!q) return true;
+    const hay = [k.name, k.username, k.prefix].filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+function paintFilterCounts(keys) {
+  const live = keys.filter((k) => !goneIds.has(k.id));
+  const chat = live.filter(isChatKey).length;
+  document.getElementById("count-all").textContent = String(live.length);
+  document.getElementById("count-chat").textContent = String(chat);
+  document.getElementById("count-key").textContent = String(live.length - chat);
+}
+
+function nameCell(k) {
+  const td = document.createElement("td");
+  const wrap = document.createElement("div");
+  wrap.className = "name-cell";
+  const name = document.createElement("span");
+  name.className = "key-name";
+  name.textContent = k.name;
+  wrap.append(name);
+  if (k.username) {
+    const badge = document.createElement("span");
+    badge.className = "pill chat";
+    badge.textContent = "前台";
+    wrap.append(badge);
+    td.title = k.name + " · " + k.username;
+  } else {
+    td.title = k.name;
+  }
+  td.append(wrap);
+  return td;
+}
+
+function userCell(k) {
+  const td = document.createElement("td");
+  if (!k.username) {
+    td.className = "user-empty";
+    td.textContent = "—";
+    return td;
+  }
+  td.className = "mono user-name-cell";
+  td.textContent = k.username;
+  td.title = k.username;
+  return td;
 }
 
 function fmtWhen(at) {
@@ -111,17 +172,27 @@ async function reload() {
 
 function paintKeyRows(keys) {
   lastKeys = keys;
+  paintFilterCounts(keys);
   const tb = document.getElementById("rows");
   tb.replaceChildren();
-  for (const k of keys) {
-    if (goneIds.has(k.id)) continue;
+  const shown = visibleKeys(keys);
+  if (!shown.length) {
     const tr = document.createElement("tr");
-    const nameTd = document.createElement("td");
-    nameTd.textContent = k.name;
-    nameTd.title = k.name;
-    const userTd = document.createElement("td");
-    userTd.className = "mono";
-    userTd.textContent = k.username || "—";
+    tr.className = "empty-row";
+    const td = document.createElement("td");
+    td.colSpan = 9;
+    td.textContent = keys.filter((k) => !goneIds.has(k.id)).length
+      ? "没有符合条件的账号"
+      : "还没有签发账号";
+    tr.append(td);
+    tb.append(tr);
+    return;
+  }
+  for (const k of shown) {
+    const tr = document.createElement("tr");
+    if (isChatKey(k)) tr.classList.add("is-chat");
+    const nameTd = nameCell(k);
+    const userTd = userCell(k);
     const prefixTd = document.createElement("td");
     prefixTd.className = "mono";
     prefixTd.textContent = k.prefix + "…";
@@ -212,8 +283,7 @@ function paintKeyRows(keys) {
         await api("/admin/api/keys/" + k.id, { method: "DELETE" });
         goneIds.add(k.id);
         pendingKeys.delete(k.id);
-        tr.remove();
-        for (const row of recent?.rows || []) row.remove();
+        paintKeyRows(lastKeys);
       });
     };
     const recent = recentToggle(k.recent);
@@ -250,6 +320,24 @@ for (const id of ["refresh", "refresh-upstream"]) {
   const btn = document.getElementById(id);
   btn.onclick = () => withBusy(btn, reload);
 }
+
+document.querySelector(".key-filters").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-key-filter]");
+  if (!btn) return;
+  const next = btn.dataset.keyFilter;
+  if (next === keyFilter) return;
+  keyFilter = next;
+  for (const el of document.querySelectorAll("[data-key-filter]")) {
+    const on = el.dataset.keyFilter === keyFilter;
+    el.classList.toggle("on", on);
+    el.setAttribute("aria-selected", on ? "true" : "false");
+  }
+  paintKeyRows(lastKeys);
+});
+document.getElementById("key-q").addEventListener("input", (e) => {
+  keyQuery = e.target.value;
+  paintKeyRows(lastKeys);
+});
 
 const dlg = document.getElementById("create-dlg");
 const onceDlg = document.getElementById("once-dlg");

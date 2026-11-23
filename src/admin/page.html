@@ -43,11 +43,18 @@
       <section data-page="keys">
         <header class="page-head">
           <h1>分发账号管理</h1>
-          <p class="sub">签发、发聊天用户名密码、调整额度、停用。明文只在创建时出现一次。</p>
+          <p class="sub">签发、发聊天用户名密码、调整额度、停用。明文只在创建时出现一次。带用户名的是前台登录账号。</p>
         </header>
         <section class="card">
           <div class="toolbar">
             <strong>已签发</strong>
+            <div class="key-filters" role="tablist" aria-label="账号类型">
+              <button type="button" class="tab on" data-key-filter="all" aria-selected="true">全部 <span class="count" id="count-all">0</span></button>
+              <button type="button" class="tab" data-key-filter="chat" aria-selected="false">前台账号 <span class="count" id="count-chat">0</span></button>
+              <button type="button" class="tab" data-key-filter="key" aria-selected="false">仅 Key <span class="count" id="count-key">0</span></button>
+            </div>
+            <input id="key-q" type="search" placeholder="搜备注或用户名" autocomplete="off" />
+            <span class="toolbar-spacer"></span>
             <button type="button" id="open-create">新建账号</button>
             <button class="ghost refresh" type="button" id="refresh"><span class="ico" aria-hidden="true">↻</span>刷新</button>
           </div>
@@ -57,7 +64,7 @@
                 <col class="c-name" /><col class="c-user" /><col class="c-prefix" /><col class="c-prov" /><col class="c-used" />
                 <col class="c-quota" /><col class="c-remain" /><col class="c-status" /><col class="c-actions" />
               </colgroup>
-              <thead><tr><th>备注</th><th>用户名</th><th>前缀</th><th>上游</th><th>已用</th><th>额度</th><th>剩余</th><th>状态</th><th></th></tr></thead>
+              <thead><tr><th>备注</th><th>前台用户名</th><th>前缀</th><th>上游</th><th>已用</th><th>额度</th><th>剩余</th><th>状态</th><th></th></tr></thead>
               <tbody id="rows"></tbody>
             </table>
           </div>

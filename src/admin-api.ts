@@ -1,3 +1,4 @@
+import { describeUserConfig } from "./admin-users.ts";
 import { currentAuto, parseAutoRoute, type AutoRoute } from "./auto";
 import { quotaBoard, userConfig } from "./durable";
 import { parseMcpPolicy } from "./net-guard.ts";
@@ -37,6 +38,9 @@ import {
   verifyAdminSession,
 } from "./lib";
 import { fetchUpstreamModels, probeUpstream } from "./upstream";
+
+/** 每个用户一次 Durable Object 调用，一次请求的子请求数有上限，所以只看前 N 个。 */
+const USERS_CONFIG_MAX = 100;
 
 /** @returns true if auth was the raw ADMIN_TOKEN (mint a session cookie). */
 export async function requireAdmin(request: Request, env: Env): Promise<boolean> {
@@ -181,6 +185,27 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
       await userConfig(env, id).clearAll();
       return Response.json({ deleted: true }, { headers: corsHeaders(request) });
     }
+  }
+
+  // 每个前台用户自己配的 MCP / Skill。只有带用户名的账号能登录聊天页，所以只看这些。
+  if (request.method === "GET" && path === "/admin/api/users-config") {
+    const chatKeys = (await listIssuedKeys(env.KEYS)).filter((k) => k.username);
+    const shown = chatKeys.slice(0, USERS_CONFIG_MAX);
+    const users = await Promise.all(
+      shown.map(async (k) => {
+        const who = { id: k.id, name: k.name, username: k.username, enabled: k.enabled };
+        try {
+          const view = await userConfig(env, k.id).getAdminView();
+          return { ...who, config: describeUserConfig(view.doc, view.secretNames, view.status) };
+        } catch {
+          return { ...who, config: null };
+        }
+      }),
+    );
+    return Response.json(
+      { users, total: chatKeys.length, truncated: chatKeys.length > shown.length },
+      { headers: { ...corsHeaders(request), "cache-control": "no-store" } },
+    );
   }
 
   if (path === "/admin/api/skills") {

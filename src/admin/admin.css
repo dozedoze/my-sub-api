@@ -307,6 +307,45 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .pill.ok { background: #123328; color: var(--accent); }
 .pill.off { background: #2a1c16; color: var(--warn); }
 .pill.chat { background: #123328; color: var(--accent); }
+.pill.bad { background: #2a1620; color: var(--danger); }
+/* 用户配置页 */
+[data-page="users"] .toolbar { margin: 4px 0 12px; }
+[data-page="users"] .toolbar #uc-q { width: 220px; flex: none; padding: 8px 10px; }
+.uc-user { padding: 0; overflow: hidden; }
+.uc-user.uc-disabled { opacity: .7; }
+.uc-user > summary {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 14px 18px; cursor: pointer; list-style: none;
+}
+.uc-user > summary::-webkit-details-marker { display: none; }
+.uc-user > summary::before {
+  content: "▸"; color: var(--muted); transition: transform .15s ease;
+}
+.uc-user[open] > summary::before { transform: rotate(90deg); }
+.uc-user[open] > summary { border-bottom: 1px solid var(--line); }
+.uc-who { display: flex; align-items: center; gap: 8px; min-width: 160px; }
+.uc-username { color: var(--accent); font-size: 12px; }
+.uc-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; }
+.uc-when { margin-left: auto; }
+.uc-body { padding: 4px 18px 16px; }
+.uc-user > .hint { padding: 12px 18px; margin: 0; }
+.uc-sec h3 { margin: 16px 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.uc-sec > .hint { margin: 0; }
+.uc-item {
+  background: #0d1118; border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 14px; margin-bottom: 8px;
+}
+.uc-item-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.uc-row { display: flex; gap: 12px; padding: 3px 0; font-size: 13px; }
+.uc-k { flex: none; width: 76px; color: var(--muted); }
+.uc-v { min-width: 0; flex: 1; word-break: break-all; }
+.uc-lines { display: flex; flex-direction: column; gap: 2px; }
+.uc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.uc-error { color: var(--danger); }
+.uc-more { margin-top: 8px; }
+.uc-more summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.uc-more pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; max-height: 280px; }
+.uc-empty { padding: 28px 12px; text-align: center; }
 button.auto-add {
   width: auto; margin-top: 4px; padding: 8px 14px;
   background: transparent; color: var(--accent); border: 1px solid #2f9e75;

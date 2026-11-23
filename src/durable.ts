@@ -104,6 +104,12 @@ export class UserConfig extends DurableObject<Env> {
     return out;
   }
 
+  /** 后台看用户配了什么：一次 RPC 取回配置、密钥名（不含值）和连接状态。 */
+  async getAdminView(): Promise<{ doc: UserConfigDoc; secretNames: string[]; status: Record<string, ServerStatus> }> {
+    const [doc, secretNames, status] = await Promise.all([this.getDoc(), this.listSecretNames(), this.getStatus()]);
+    return { doc, secretNames, status };
+  }
+
   async putStatus(serverId: string, status: ServerStatus): Promise<void> {
     await this.ctx.storage.put(`status:${serverId}`, status);
   }

@@ -6,8 +6,8 @@ function fillSkills(status) {
   document.getElementById("skill-rounds").value = String(cfg.maxRounds || 3);
   const hint = document.getElementById("skills-search-hint");
   hint.textContent = status.searchConfigured
-    ? "web_search 已配置搜索密钥。"
-    : "未配置 TAVILY_API_KEY / BRAVE_API_KEY 时，web_search 不会注入。";
+    ? "搜索服务已配置，联网搜索可用。"
+    : "还没配搜索服务的密钥（TAVILY_API_KEY 或 BRAVE_API_KEY），联网搜索暂时不会生效。";
   fillMcpPolicy(status.mcpPolicy);
 }
 
@@ -17,8 +17,8 @@ function fillMcpPolicy(policy) {
   document.getElementById("mcp-allow").value = (policy.allowDomains || []).join("\n");
   document.getElementById("mcp-deny").value = (policy.denyDomains || []).join("\n");
   document.getElementById("mcp-secrets-hint").textContent = policy.secretsConfigured
-    ? "USER_SECRETS_KEY 已配置，用户可以保存 MCP 密钥。"
-    : "未配置 USER_SECRETS_KEY：用户无法保存 MCP 密钥（不会明文存储）。用 wrangler secret put USER_SECRETS_KEY 设置。";
+    ? "加密主密钥已设置，用户可以保存 MCP 密钥（加密存储）。"
+    : "还没设置加密主密钥，用户没法保存带密钥的 MCP（不会明文存）。在终端执行 wrangler secret put USER_SECRETS_KEY 设置。";
 }
 
 async function saveSkills() {

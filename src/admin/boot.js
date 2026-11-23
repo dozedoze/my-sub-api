@@ -1,8 +1,8 @@
-const PAGES = ["keys", "upstream", "skills", "guide"];
-const PAGE_TITLE = { keys: "分发账号管理", upstream: "上游账号", skills: "通用 Skill", guide: "接入指南" };
+const PAGES = ["keys", "users", "upstream", "skills", "guide"];
+const PAGE_TITLE = { keys: "分发账号管理", users: "用户配置", upstream: "上游账号", skills: "联网与 MCP 开关", guide: "接入指南" };
 const PAGE_FROM_SLUG = {
-  keys: "keys", upstream: "upstream", skills: "skills", guide: "guide",
-  密钥: "keys", 上游: "upstream", 接入: "guide",
+  keys: "keys", users: "users", upstream: "upstream", skills: "skills", guide: "guide",
+  密钥: "keys", 用户: "users", 上游: "upstream", 接入: "guide",
 };
 
 function decodeSeg(s) {
@@ -38,6 +38,7 @@ function applyPage(id) {
   }
   document.title = (PAGE_TITLE[id] || "分发账号管理") + " · API 分发";
   if (id === "guide") renderGuide();
+  if (id === "users") loadUsers();
 }
 
 function showPage(id, replace) {

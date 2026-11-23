@@ -33,8 +33,9 @@
       </div>
       <nav aria-label="后台">
         <a class="nav on" href="/admin/keys" data-nav="keys" aria-current="page">分发账号</a>
+        <a class="nav" href="/admin/users" data-nav="users">用户配置</a>
         <a class="nav" href="/admin/upstream" data-nav="upstream">上游账号</a>
-        <a class="nav" href="/admin/skills" data-nav="skills">通用 Skill</a>
+        <a class="nav" href="/admin/skills" data-nav="skills">联网与 MCP 开关</a>
         <a class="nav" href="/admin/guide" data-nav="guide">接入指南</a>
       </nav>
       <button class="ghost" type="button" id="logout">退出</button>
@@ -71,18 +72,37 @@
         </section>
       </section>
 
+      <section data-page="users" hidden>
+        <header class="page-head">
+          <h1>用户配置</h1>
+          <p class="sub">每个前台用户在聊天页「扩展」里自己添加了哪些 MCP 和 Skill。只读，密钥只显示名字，看不到值。</p>
+        </header>
+        <div class="page-body">
+          <div class="toolbar">
+            <span class="hint" id="uc-summary">读取中…</span>
+            <span class="toolbar-spacer"></span>
+            <label class="check" style="margin:0"><input type="checkbox" id="uc-only" checked /> 只看配置过的</label>
+            <input id="uc-q" type="search" placeholder="搜用户、MCP 或 Skill" autocomplete="off" />
+            <button class="ghost refresh" type="button" id="uc-refresh"><span class="ico" aria-hidden="true">↻</span>刷新</button>
+          </div>
+          <p class="err" id="uc-err"></p>
+          <div id="uc-list"></div>
+        </div>
+      </section>
+
       <section data-page="skills" hidden>
         <header class="page-head">
-          <h1>通用 Skill</h1>
-          <p class="sub">只挂在 /v1/skill/* 。默认 /v1 纯转发，Cursor 不受影响。</p>
+          <h1>联网与 MCP 开关</h1>
+          <p class="sub">管理员总开关：模型能不能联网，用户能不能接自己的 MCP。只在聊天页（以及接口地址写成 …/v1/skill 的客户端）生效，Cursor 等直接用 /v1 的客户端不受影响。</p>
         </header>
         <div class="page-body">
         <section class="card">
+          <h2>让模型联网（所有用户共用）</h2>
           <p class="hint" id="skills-search-hint"></p>
-          <label class="check"><input type="checkbox" id="skill-web_search" /> web_search（联网搜索）</label>
-          <label class="check"><input type="checkbox" id="skill-fetch_url" /> fetch_url（读网页）</label>
-          <div class="field" style="margin-top:12px;max-width:180px">
-            <label for="skill-rounds">最多工具轮次</label>
+          <label class="check"><input type="checkbox" id="skill-web_search" /> 联网搜索（web_search）：模型可以搜索互联网</label>
+          <label class="check"><input type="checkbox" id="skill-fetch_url" /> 读取网页（fetch_url）：模型可以打开用户给的链接</label>
+          <div class="field" style="margin-top:12px;max-width:260px">
+            <label for="skill-rounds">一次提问里，模型最多连续用几轮工具（1-8）</label>
             <input id="skill-rounds" type="number" min="1" max="8" value="3" />
           </div>
           <p class="err" id="skills-err"></p>
@@ -91,16 +111,16 @@
           </div>
         </section>
         <section class="card">
-          <h2>用户自带 MCP</h2>
-          <p class="hint">用户在聊天页自己添加 MCP server，只在 /v1/skill/* 上由网关代连。地址只允许 https 域名（不含 IP、内网、本站）。</p>
+          <h2>用户自己接 MCP</h2>
+          <p class="hint">MCP 是给模型接外部工具的服务（比如查文档、查数据库）。用户在聊天页「扩展」里自己添加，由网关代为连接。地址只能是公网 https 域名，不能是 IP、内网或本站。每个用户最多 8 个 MCP、20 个 Skill。具体谁配了什么，看左侧「用户配置」。</p>
           <p class="hint" id="mcp-secrets-hint"></p>
-          <label class="check"><input type="checkbox" id="mcp-enabled" /> 允许用户使用 MCP</label>
+          <label class="check"><input type="checkbox" id="mcp-enabled" /> 允许用户使用 MCP（关掉后所有用户的 MCP 都暂停，Skill 不受影响）</label>
           <div class="field" style="margin-top:12px">
-            <label for="mcp-allow">只允许这些域名（每行一个，含子域名；留空表示不限）</label>
+            <label for="mcp-allow">白名单：只允许连这些域名（每行一个，子域名也算；留空 = 不限制，任何公网 https 域名都能连）</label>
             <textarea id="mcp-allow" rows="3" spellcheck="false"></textarea>
           </div>
           <div class="field" style="margin-top:12px">
-            <label for="mcp-deny">一律拒绝这些域名（每行一个，优先于上面）</label>
+            <label for="mcp-deny">黑名单：一律不许连这些域名（每行一个，优先于白名单）</label>
             <textarea id="mcp-deny" rows="3" spellcheck="false"></textarea>
           </div>
           <p class="err" id="mcp-err"></p>

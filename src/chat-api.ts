@@ -18,6 +18,7 @@ import {
   verifyChatSession,
   verifyPassword,
 } from "./lib.ts";
+import { userConfigApi } from "./user-config-api.ts";
 
 const DUMMY_SALT = "00".repeat(16);
 
@@ -75,6 +76,12 @@ export async function chatApi(request: Request, env: Env, path: string): Promise
       },
       { headers },
     );
+  }
+
+  if (path === "/chat/api/config" || path.startsWith("/chat/api/config/")) {
+    const rec = await sessionUser(request, env);
+    if (!rec) throw new GatewayError(401, "unauthorized", "Not signed in");
+    return userConfigApi(request, env, path, rec);
   }
 
   if (request.method === "POST" && path === "/chat/api/login") {

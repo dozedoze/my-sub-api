@@ -10,9 +10,11 @@ import {
   type ChatMessage,
   type Meter,
 } from "./lib";
+import type { ServerStatus } from "./mcp.ts";
+import { EMPTY_DOC, type McpServerConfig, type SkillConfig, type UserConfigDoc } from "./user-config.ts";
 
 function meterName(id: string): string {
-  return id.startsWith("anon:") || id.startsWith("admin:") || id.startsWith("login:") ? `g:${id}` : `k:${id}`;
+  return /^(anon|admin|login|mcp|mcptest|config):/.test(id) ? `g:${id}` : `k:${id}`;
 }
 
 export class ChatSession extends DurableObject<Env> {
@@ -41,6 +43,87 @@ export class ChatSession extends DurableObject<Env> {
   async saveAutoModel(model: string): Promise<void> {
     await this.ctx.storage.put("autoModel", model);
   }
+}
+
+/**
+ * 每个用户一个：自己的 MCP server、Skill、加密后的密钥、连接状态和工具缓存。
+ * 强一致，保存密钥后马上就能测试连接。密钥只存密文，主密钥不在这里。
+ */
+export class UserConfig extends DurableObject<Env> {
+  async getDoc(): Promise<UserConfigDoc> {
+    return (await this.ctx.storage.get<UserConfigDoc>("doc")) ?? EMPTY_DOC;
+  }
+
+  async putDoc(
+    next: { mcpServers: McpServerConfig[]; skills: SkillConfig[] },
+    expectedVersion: number,
+  ): Promise<{ ok: true; doc: UserConfigDoc } | { ok: false; doc: UserConfigDoc }> {
+    const cur = await this.getDoc();
+    if (cur.version !== expectedVersion) return { ok: false, doc: cur };
+    const doc: UserConfigDoc = { version: cur.version + 1, ...next, updatedAt: Date.now() };
+    await this.ctx.storage.put("doc", doc);
+    const live = new Set(next.mcpServers.map((s) => s.id));
+    for (const old of cur.mcpServers) {
+      if (!live.has(old.id)) await this.ctx.storage.delete([`status:${old.id}`, `tools:${old.id}`]);
+    }
+    return { ok: true, doc };
+  }
+
+  async listSecretNames(): Promise<string[]> {
+    const names: string[] = [];
+    for (const key of (await this.ctx.storage.list({ prefix: "secret:" })).keys()) names.push(key.slice("secret:".length));
+    return names.sort();
+  }
+
+  async getSecretCiphers(names: string[]): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    for (const name of names) {
+      const value = await this.ctx.storage.get<string>(`secret:${name}`);
+      if (typeof value === "string") out[name] = value;
+    }
+    return out;
+  }
+
+  async putSecrets(entries: { name: string; cipher: string }[], max: number): Promise<{ ok: boolean }> {
+    const existing = new Set(await this.listSecretNames());
+    for (const entry of entries) existing.add(entry.name);
+    if (existing.size > max) return { ok: false };
+    for (const entry of entries) await this.ctx.storage.put(`secret:${entry.name}`, entry.cipher);
+    return { ok: true };
+  }
+
+  async deleteSecret(name: string): Promise<boolean> {
+    return this.ctx.storage.delete(`secret:${name}`);
+  }
+
+  async getStatus(): Promise<Record<string, ServerStatus>> {
+    const out: Record<string, ServerStatus> = {};
+    for (const [key, value] of await this.ctx.storage.list<ServerStatus>({ prefix: "status:" })) {
+      out[key.slice("status:".length)] = value;
+    }
+    return out;
+  }
+
+  async putStatus(serverId: string, status: ServerStatus): Promise<void> {
+    await this.ctx.storage.put(`status:${serverId}`, status);
+  }
+
+  /** 工具缓存以 JSON 文本存取：第三方的 schema 是任意结构，不适合走 RPC 的类型推导。 */
+  async getToolsJson(serverId: string): Promise<string | null> {
+    return (await this.ctx.storage.get<string>(`tools:${serverId}`)) ?? null;
+  }
+
+  async putToolsJson(serverId: string, json: string): Promise<void> {
+    await this.ctx.storage.put(`tools:${serverId}`, json);
+  }
+
+  async clearAll(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+}
+
+export function userConfig(env: Env, userId: string): DurableObjectStub<UserConfig> {
+  return env.USER_CONFIG.get(env.USER_CONFIG.idFromName(userId));
 }
 
 export class QuotaBoard extends DurableObject<Env> {

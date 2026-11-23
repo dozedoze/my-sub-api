@@ -19,7 +19,7 @@ import {
 import { proxy } from "./proxy";
 import { proxySkills } from "./skill-proxy";
 
-export { ChatSession, QuotaBoard } from "./durable";
+export { ChatSession, QuotaBoard, UserConfig } from "./durable";
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {

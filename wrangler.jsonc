@@ -57,11 +57,13 @@
   "durable_objects": {
     "bindings": [
       { "name": "SESSIONS", "class_name": "ChatSession" },
-      { "name": "QUOTAS", "class_name": "QuotaBoard" }
+      { "name": "QUOTAS", "class_name": "QuotaBoard" },
+      { "name": "USER_CONFIG", "class_name": "UserConfig" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ChatSession"] },
-    { "tag": "v2", "new_sqlite_classes": ["QuotaBoard"] }
+    { "tag": "v2", "new_sqlite_classes": ["QuotaBoard"] },
+    { "tag": "v3", "new_sqlite_classes": ["UserConfig"] }
   ]
 }

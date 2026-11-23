@@ -4,6 +4,12 @@
 # 管理后台口令（签发 / 吊销用户 Key）
 ADMIN_TOKEN=change-me-to-a-long-random-string
 
+# 加密用户 MCP 密钥的主密钥：32 字节随机数，64 位十六进制。
+# 生成：node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# 没配置时，用户保存 MCP 密钥会被拒绝（不会明文存储）。生产用 wrangler secret put USER_SECRETS_KEY。
+# 换这把 Key 会让已保存的用户密钥全部失效，需要用户重新填。
+USER_SECRETS_KEY=
+
 # PROVIDERS 里每个 id 对应一把 Key，例如 grok → GROK_API_KEY
 GROK_API_KEY=
 DEEPSEEK_API_KEY=

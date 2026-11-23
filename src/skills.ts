@@ -1,7 +1,7 @@
 import { loadSkills, type HostedSkillId, type SkillsConfig } from "./keys.ts";
 import { corsHeaders, GatewayError } from "./lib.ts";
 
-type ToolCall = { id: string; name: string; input: Record<string, unknown> };
+export type ToolCall = { id: string; name: string; input: Record<string, unknown> };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -20,11 +20,14 @@ export function liveSkillIds(config: SkillsConfig, env: Env): HostedSkillId[] {
   return config.enabled.filter((id) => id !== "web_search" || searchConfigured(env));
 }
 
-type SkillTool = {
-  name: HostedSkillId;
+/** Anthropic 形状的工具声明；chat/completions 时再包成 function。 */
+export type ToolDef = {
+  name: string;
   description: string;
-  input_schema: { type: "object"; properties: Record<string, { type: string; description: string }>; required: string[] };
+  input_schema: Record<string, unknown>;
 };
+
+type SkillTool = ToolDef & { name: HostedSkillId };
 
 const SEARCH_TOOL: SkillTool = {
   name: "web_search",
@@ -51,7 +54,7 @@ const ANTHROPIC_TOOLS: Record<HostedSkillId, SkillTool> = {
   fetch_url: FETCH_TOOL,
 };
 
-function openaiTool(skill: SkillTool) {
+function openaiTool(skill: ToolDef) {
   return {
     type: "function",
     function: {
@@ -75,15 +78,25 @@ function existingNames(tools: unknown): Set<string> {
   return names;
 }
 
-export function injectHostedSkills(body: Record<string, unknown>, rest: string, enabled: HostedSkillId[]): void {
-  if (!enabled.length) return;
+/**
+ * 挂上托管工具，以及用户自己的 MCP / Skill 工具。客户端已经有同名工具就不挂。
+ * @returns 实际挂上的 extra 工具名，只有这些名字的调用才由网关接手。
+ */
+export function injectHostedSkills(
+  body: Record<string, unknown>,
+  rest: string,
+  enabled: HostedSkillId[],
+  userTools: ToolDef[] = [],
+): string[] {
   const names = existingNames(body.tools);
   // DeepSeek 自带搜索时不重复挂 web_search
   if (names.has("deepseek_web_search") || names.has("deepseek_read_url")) {
     enabled = enabled.filter((id) => id !== "web_search" && id !== "fetch_url");
   }
-  const extra = enabled.filter((id) => !names.has(id)).map((id) => ANTHROPIC_TOOLS[id]);
-  if (!extra.length) return;
+  const hosted: ToolDef[] = enabled.filter((id) => !names.has(id)).map((id) => ANTHROPIC_TOOLS[id]);
+  const mine = userTools.filter((tool) => !names.has(tool.name));
+  const extra = [...hosted, ...mine];
+  if (!extra.length) return [];
   const tools = Array.isArray(body.tools) ? [...body.tools] : [];
   if (rest === "chat/completions" || rest === "completions") {
     tools.push(...extra.map(openaiTool));
@@ -91,6 +104,7 @@ export function injectHostedSkills(body: Record<string, unknown>, rest: string, 
     tools.push(...extra);
   }
   body.tools = tools;
+  return mine.map((tool) => tool.name);
 }
 
 function parseArgs(raw: unknown): Record<string, unknown> {
@@ -105,7 +119,7 @@ function parseArgs(raw: unknown): Record<string, unknown> {
   return asRecord(raw) ?? {};
 }
 
-export function extractHostedCalls(json: unknown, rest: string, enabled: HostedSkillId[]): ToolCall[] {
+export function extractHostedCalls(json: unknown, rest: string, enabled: readonly string[]): ToolCall[] {
   const allow = new Set(enabled);
   const out: ToolCall[] = [];
   const rec = asRecord(json);
@@ -116,7 +130,7 @@ export function extractHostedCalls(json: unknown, rest: string, enabled: HostedS
     for (const block of content) {
       const b = asRecord(block);
       if (!b || b.type !== "tool_use" || typeof b.id !== "string" || typeof b.name !== "string") continue;
-      if (!allow.has(b.name as HostedSkillId)) continue;
+      if (!allow.has(b.name)) continue;
       out.push({ id: b.id, name: b.name, input: parseArgs(b.input) });
     }
     return out;
@@ -130,7 +144,7 @@ export function extractHostedCalls(json: unknown, rest: string, enabled: HostedS
     const c = asRecord(call);
     const fn = asRecord(c?.function);
     if (!c || typeof c.id !== "string" || typeof fn?.name !== "string") continue;
-    if (!allow.has(fn.name as HostedSkillId)) continue;
+    if (!allow.has(fn.name)) continue;
     out.push({ id: c.id, name: fn.name, input: parseArgs(fn.arguments) });
   }
   return out;

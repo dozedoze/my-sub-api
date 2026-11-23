@@ -1,5 +1,7 @@
 import { currentAuto, parseAutoRoute, type AutoRoute } from "./auto";
-import { quotaBoard } from "./durable";
+import { quotaBoard, userConfig } from "./durable";
+import { parseMcpPolicy } from "./net-guard.ts";
+import { secretsConfigured } from "./secrets.ts";
 import {
   banUpstream,
   clearAutoModels,
@@ -7,12 +9,14 @@ import {
   deleteIssuedKey,
   HOSTED_SKILL_IDS,
   listIssuedKeys,
+  loadMcpPolicy,
   loadSkills,
   loadUpstreamBans,
   parseSkillsConfig,
   patchIssuedKey,
   resetIssuedPassword,
   saveAutoModels,
+  saveMcpPolicy,
   saveSkills,
   unbanUpstream,
 } from "./keys";
@@ -101,6 +105,7 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
         skills: await loadSkills(env.KEYS),
         skillsCatalog: [...HOSTED_SKILL_IDS],
         searchConfigured: searchConfigured(env),
+        mcpPolicy: { ...(await loadMcpPolicy(env.KEYS)), secretsConfigured: secretsConfigured(env) },
       },
       { headers: corsHeaders(request) },
     );
@@ -172,6 +177,8 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
       const ok = await deleteIssuedKey(env.KEYS, id);
       if (!ok) throw new GatewayError(404, "not_found", "Key not found");
       await board.reset(id);
+      // 用户删了，他的 MCP 配置和加密密钥一并清掉。
+      await userConfig(env, id).clearAll();
       return Response.json({ deleted: true }, { headers: corsHeaders(request) });
     }
   }
@@ -188,6 +195,20 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
       const config = parseSkillsConfig(body);
       await saveSkills(env.KEYS, config);
       return Response.json({ ...config, saved: true, searchConfigured: searchConfigured(env) }, { headers: corsHeaders(request) });
+    }
+  }
+
+  if (path === "/admin/api/mcp-policy") {
+    if (request.method === "GET") {
+      return Response.json(
+        { ...(await loadMcpPolicy(env.KEYS)), secretsConfigured: secretsConfigured(env) },
+        { headers: corsHeaders(request) },
+      );
+    }
+    if (request.method === "PUT" || request.method === "POST") {
+      const policy = parseMcpPolicy(await request.json().catch(() => null));
+      await saveMcpPolicy(env.KEYS, policy);
+      return Response.json({ ...policy, saved: true, secretsConfigured: secretsConfigured(env) }, { headers: corsHeaders(request) });
     }
   }
 

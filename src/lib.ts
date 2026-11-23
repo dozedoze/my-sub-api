@@ -114,6 +114,12 @@ export const GATE = {
   loginLockMs: 15 * 60_000,
   /** 只拦没登录成功的撞库，登录后不限。 */
   adminRpm: 40,
+  /** 带用户 MCP 的聊天请求，每个用户每分钟最多几次（每次可能触发出站连接）。 */
+  mcpRpm: 60,
+  /** 「测试连接」会让网关向用户填的地址发请求，要卡得更紧。 */
+  mcpTestRpm: 10,
+  /** 用户配置的读写。 */
+  configRpm: 60,
   maxBodyBytes: 8_000_000,
   maxFileBytes: 32_000_000,
   maxTokens: 131_072,
@@ -1369,6 +1375,8 @@ export type ListedModel = {
   owned_by: string;
   display_name?: string;
   description?: string;
+  /** 深度思考能力：toggle / effort / always / none / unknown，auto 本身是 auto。 */
+  thinking?: string;
 };
 
 /** Claude Code 发现模型时丢掉不含 claude/anthropic 的 id。加一层前缀让 /model 能看到千问。 */

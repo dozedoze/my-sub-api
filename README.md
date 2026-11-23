@@ -70,6 +70,7 @@ npx wrangler secret put OPENCODE_API_KEY
 | var | `PROVIDERS` | JSON 数组，上游账号列表。没写模型前缀时走第一个配了密钥的。每项可加 `quota` 声明余额查询 |
 | var | `MODEL_ALIASES` | JSON 对象，例如 `{"gpt-4":"opencode/gpt-5.4"}` |
 | 管理后台 | auto 简单档 / 复杂档 | 简单档一个模型，复杂档按顺序回退。没配则用内置档：简单档 `opencode/qwen3.8-flash`，复杂档 `grok/grok-4.7` → `opencode/grok-4.7` → `opencode/kimi-k3` → `opencode/qwen4-max` |
+| 代码 | `src/thinking.ts` 的 `NAME_RULES` | 深度思考能力表，按模型名认（toggle / effort / always / none / unknown）。新模型认不出就加一行。`/v1/models` 每项带 `thinking` 字段，前端据此决定显示不显示开关；`auto` 开启深度思考时直接走复杂档，并把能思考的模型排前面 |
 | var | `DEFAULT_QUOTA_TOKENS` | 签发 Key 的默认 token 额度，默认 `1000000`；`0` 表示不限额 |
 
 加一个 OpenAI 官方上游示例：
@@ -175,6 +176,34 @@ Settings → Models → 打开 Override OpenAI Base URL → 填 `https://<worker
 
 上下文存在 Durable Object 里（强一致）。超过约 80 条或体积过大时会丢掉最旧的非 system 轮。
 
+## 用户自带 MCP 与 Skill
+
+登录用户可以在聊天页「扩展」里配置自己的 MCP server 和 Skill，按 Key id 存在每个用户自己的 Durable Object（`UserConfig`）里。只在 `/v1/skill/*`、`/anthropic/v1/skill/*` 的 `messages` 和 `chat/completions` 上生效，默认 `/v1` 仍然纯转发。
+
+- **MCP 由网关代连**：支持 Streamable HTTP 和旧版 HTTP+SSE（`transport: auto` 先试前者，POST 不被接受再回退）。协议版本 `2025-11-25` 到 `2024-11-05` 都能协商。工具名统一成 `mcp__{server}__{tool}`，schema 做归一，结果包成「不可信数据」再给模型。stdio 类 server 网关跑不了，导入时会跳过并提示。
+- **默认只暴露只读工具**：只有声明了 `readOnlyHint` 的工具才会给模型。用户对某个 server 打开「允许写操作」后才暴露全部。很多 server 不写 annotations，会因此一个工具都不暴露。
+- **密钥不明文存**：Authorization 等敏感头和 URL 里的 token 只能写成 `${secret:NAME}`，明文会被拒绝。密钥用 AES-256-GCM 加密，主密钥是 Worker secret `USER_SECRETS_KEY`，密文绑定用户和名字。接口永远不回传密钥值。没配置主密钥时拒绝保存密钥。
+- **导入兼容各家 mcp.json**：Cursor、Claude Desktop / Code、VS Code（`servers`、`${input:x}`）、opencode、Anthropic API 的 `mcp_servers`。明文 token 会自动抽成密钥，`${env:X}` 会换成 `${secret:X}`。
+- **Skill 只做指令包**：名称、描述常驻 system，正文由模型调用 `load_skill` 按需读取。不执行脚本。
+- **管理员开关**：后台「通用 Skill」页可以整体关闭用户 MCP，并设置域名白名单、黑名单。关掉后用户的 Skill 仍然生效。
+
+接口（聊天 cookie 登录，写操作要求 Origin 是聊天页）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/chat/api/config` | 配置、密钥名（不含值）、各 server 状态、限制 |
+| PUT | `/chat/api/config` | 整份保存，带 `version`，冲突返回 409 |
+| PUT / DELETE | `/chat/api/config/secrets/{NAME}` | 写入或删除密钥，`{"value": "..."}` |
+| POST | `/chat/api/config/import` | 导入 mcp.json；`apply: false` 只预览 |
+| POST | `/chat/api/config/mcp/{id}/test` | 连接并列出工具，每分钟 10 次 |
+
+上线前要设置主密钥，并且只设一次（换了会让已存的用户密钥全部失效）：
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+npx wrangler secret put USER_SECRETS_KEY
+```
+
 ## 安全
 
 - 上游 Key、`ADMIN_TOKEN` 只放在 `wrangler secret` 或本地 `.dev.vars`
@@ -182,3 +211,4 @@ Settings → Models → 打开 Override OpenAI Base URL → 填 `https://<worker
 - 日志只记签发 Key 的 id / 模型 / 路径，不记明文
 - 上游 401/403 会收成统一的 502，避免把上游报错直接甩给使用者
 - 管理接口必须带 `Authorization: Bearer <ADMIN_TOKEN>`
+- 用户 MCP 的出站请求只允许 https 域名 + 443，拒绝 IP、内网和保留后缀、本站域名；重定向逐跳重新校验，跨源时丢掉用户配置的请求头；响应大小、连接时间、每次请求的调用次数都有上限

@@ -10,6 +10,7 @@ import {
   type KeyPublic,
   type KeyRecord,
 } from "./lib.ts";
+import { DEFAULT_MCP_POLICY, parseMcpPolicy, type McpPolicy } from "./net-guard.ts";
 
 const ID_PREFIX = "id:";
 const HASH_PREFIX = "hash:";
@@ -221,6 +222,23 @@ export async function loadSkills(kv: KVNamespace): Promise<SkillsConfig> {
 
 export async function saveSkills(kv: KVNamespace, config: SkillsConfig): Promise<void> {
   await kv.put(SKILLS_KEY, JSON.stringify(config));
+}
+
+const MCP_POLICY_KEY = "mcp_policy";
+
+export async function loadMcpPolicy(kv: KVNamespace): Promise<McpPolicy> {
+  const raw = await kv.get<unknown>(MCP_POLICY_KEY, "json");
+  if (raw == null) return { ...DEFAULT_MCP_POLICY };
+  try {
+    return parseMcpPolicy(raw);
+  } catch {
+    // 配置坏了就按最严的处理：关闭，而不是放开。
+    return { enabled: false, allowDomains: [], denyDomains: [] };
+  }
+}
+
+export async function saveMcpPolicy(kv: KVNamespace, policy: McpPolicy): Promise<void> {
+  await kv.put(MCP_POLICY_KEY, JSON.stringify(policy));
 }
 
 export type UpstreamBan = {

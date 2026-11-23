@@ -44,6 +44,7 @@ input, select, textarea {
 }
 input::placeholder, textarea::placeholder { color: #6b7588; }
 textarea { min-height: 88px; resize: vertical; }
+.card h2 { margin: 0 0 8px; font-size: 15px; }
 input:focus, select:focus, textarea:focus { border-color: #2f9e75; }
 td input { width: 128px; padding: 6px 8px; }
 .quota-cell { min-width: 160px; }

@@ -12,11 +12,12 @@ interface __BaseEnv_Env {
 	OPENCODE_API_KEY: string;
 	SESSIONS: DurableObjectNamespace<import("./src/index").ChatSession>;
 	QUOTAS: DurableObjectNamespace<import("./src/index").QuotaBoard>;
+	USER_CONFIG: DurableObjectNamespace<import("./src/index").UserConfig>;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
-		durableNamespaces: "ChatSession" | "QuotaBoard";
+		durableNamespaces: "ChatSession" | "QuotaBoard" | "UserConfig";
 	}
 	interface Env extends __BaseEnv_Env {}
 }

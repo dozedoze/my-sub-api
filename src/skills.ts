@@ -262,6 +262,24 @@ function sseFromAnthropic(json: Record<string, unknown>): string {
   let i = 0;
   for (const block of blocks) {
     const rec = asRecord(block);
+    if (rec?.type === "thinking") {
+      const thought = typeof rec.thinking === "string" ? rec.thinking : "";
+      const signature = typeof rec.signature === "string" ? rec.signature : "";
+      ev("content_block_start", {
+        type: "content_block_start",
+        index: i,
+        content_block: { type: "thinking", thinking: "" },
+      });
+      if (thought) {
+        ev("content_block_delta", { type: "content_block_delta", index: i, delta: { type: "thinking_delta", thinking: thought } });
+      }
+      if (signature) {
+        ev("content_block_delta", { type: "content_block_delta", index: i, delta: { type: "signature_delta", signature } });
+      }
+      ev("content_block_stop", { type: "content_block_stop", index: i });
+      i += 1;
+      continue;
+    }
     if (!rec || rec.type !== "text") continue;
     const text = typeof rec.text === "string" ? rec.text : "";
     ev("content_block_start", { type: "content_block_start", index: i, content_block: { type: "text", text: "" } });

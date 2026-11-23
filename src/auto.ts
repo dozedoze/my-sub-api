@@ -247,6 +247,23 @@ export function easyServeChain(easy: string, providerIds: Iterable<string>): str
   return out;
 }
 
+/**
+ * auto 能落到的所有模型（简单档含便宜链、复杂档整条链）里最小的上下文窗口。
+ * 切档后不会落到更小的窗口而超限。没报窗口的模型不参与；一个都没有就返回 undefined。
+ */
+export function autoContextWindow(
+  route: AutoRoute,
+  providerIds: Iterable<string>,
+  windowOf: (spec: string) => number | undefined,
+): number | undefined {
+  let min: number | undefined;
+  for (const spec of [...easyServeChain(route.easy, providerIds), ...route.hard]) {
+    const w = windowOf(spec);
+    if (w && (min === undefined || w < min)) min = w;
+  }
+  return min;
+}
+
 const AUTO_ROUTER_SYSTEM = [
   "你只负责给日常对话分档，只输出 easy 或 hard。",
   "easy：闲聊、翻译、润色、摘要、解释、写邮件、推荐、简单事实、看图识物、一两段就能写完的小代码。日常问题默认这一档。",

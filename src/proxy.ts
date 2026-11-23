@@ -17,7 +17,7 @@ import {
   type InlinedFile,
   type MessagesWire,
 } from "./anthropic";
-import { currentAuto, isAutoModel, planAuto, type AutoVia } from "./auto";
+import { autoContextWindow, currentAuto, isAutoModel, planAuto, type AutoRoute, type AutoVia } from "./auto";
 import {
   shapeAnthropicThinking,
   shapeResponsesThinking,
@@ -185,7 +185,12 @@ async function proxyAfterGate(
     const targets = (issued.provider ? [map.get(issued.provider)] : live).filter(
       (p): p is Provider => p != null && !blocked.has(p.id),
     );
-    return listModels(targets, Boolean(autoRoute), request, rest);
+    return listModels(
+      targets,
+      autoRoute ? { route: autoRoute, providers: map, blocked, aliases, keyProvider: issued.provider, defaultProvider } : null,
+      request,
+      rest,
+    );
   }
 
   let model: string | undefined;
@@ -491,17 +496,51 @@ function listedThinking(
   return thinkingMode(bare, messagesWire(head.baseUrl, bare, head.messages));
 }
 
+type AutoListing = {
+  route: AutoRoute;
+  providers: Map<string, Provider>;
+  blocked: Set<string>;
+  aliases: Record<string, string>;
+  keyProvider?: string;
+  defaultProvider: string;
+};
+
+/** 把链上的 provider/model 按转发时同一套规则映射回上游，再取目录里报的窗口。锁定的 Key 不能用的模型被跳过。 */
+function autoWindow(
+  auto: AutoListing,
+  groups: { members: Provider[]; windows: Record<string, number> }[],
+): number | undefined {
+  const byAccount = new Map<string, Record<string, number>>();
+  for (const g of groups) for (const m of g.members) byAccount.set(m.id, g.windows);
+  return autoContextWindow(auto.route, auto.providers.keys(), (spec) => {
+    try {
+      const picked = pickUpstream({
+        requestedModel: spec,
+        aliases: auto.aliases,
+        keyProvider: auto.keyProvider,
+        defaultProvider: auto.defaultProvider,
+        providers: auto.providers,
+        blocked: auto.blocked,
+      });
+      return byAccount.get(picked.provider.id)?.[picked.model];
+    } catch {
+      return undefined;
+    }
+  });
+}
+
 async function listModels(
   providers: Provider[],
-  includeAuto: boolean,
+  auto: AutoListing | null,
   request: Request,
   rest: string,
 ): Promise<Response> {
+  const vendors = vendorGroups(providers);
   const groups = await Promise.all(
-    vendorGroups(providers).map(async (g) => ({ providerId: g.id, ...(await fetchGroupModels(g.members)) })),
+    vendors.map(async (g) => ({ providerId: g.id, members: g.members, ...(await fetchGroupModels(g.members)) })),
   );
-  const heads = new Map(vendorGroups(providers).map((g) => [g.id, g.members[0]]));
-  const listed = (includeAuto ? exposeAutoModel(exposeModels(groups)) : exposeModels(groups)).map((m) => ({
+  const heads = new Map(vendors.map((g) => [g.id, g.members[0]]));
+  const listed = (auto ? exposeAutoModel(exposeModels(groups), autoWindow(auto, groups)) : exposeModels(groups)).map((m) => ({
     ...m,
     thinking: listedThinking(m, heads),
   }));

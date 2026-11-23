@@ -85,6 +85,7 @@ import {
   autoRouterTranscript,
   cheapRouterChain,
   easyServeChain,
+  autoContextWindow,
   orderAutoTargets,
   parseAutoRoute,
   resolveAutoRoute,
@@ -965,4 +966,13 @@ test("model windows pass through only when the upstream states them", () => {
   const listed = exposeModels([{ providerId: "p", models: ["a", "c"], windows: { a: 131072 } }]);
   assert.equal(listed[0].context_length, 131072);
   assert.equal("context_length" in listed[1], false);
+});
+
+test("auto advertises the smallest window across both tiers", () => {
+  const route = { easy: "p/easy", hard: ["p/big", "q/small", "q/unknown"] };
+  const windows: Record<string, number> = { "p/easy": 128000, "p/big": 1000000, "q/small": 64000 };
+  assert.equal(autoContextWindow(route, [], (s) => windows[s]), 64000);
+  assert.equal(autoContextWindow(route, [], () => undefined), undefined);
+  assert.equal(exposeAutoModel([], 64000)[0].context_length, 64000);
+  assert.equal("context_length" in exposeAutoModel([])[0], false);
 });

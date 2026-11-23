@@ -1384,9 +1384,13 @@ export function exposeModels(
   return out;
 }
 
-export function exposeAutoModel(models: ExposedModel[]): ExposedModel[] {
+/** contextLength 是 auto 两档所有候选里最小的窗口；算不出来就不给，由客户端按名字估。 */
+export function exposeAutoModel(models: ExposedModel[], contextLength?: number): ExposedModel[] {
   if (models.some((m) => m.id === "auto")) return models;
-  return [{ id: "auto", object: "model", created: 0, owned_by: "auto" }, ...models];
+  return [
+    { id: "auto", object: "model", created: 0, owned_by: "auto", ...(contextLength ? { context_length: contextLength } : {}) },
+    ...models,
+  ];
 }
 
 export type ListedModel = {

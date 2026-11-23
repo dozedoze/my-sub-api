@@ -10,7 +10,9 @@ import {
 } from "./skills.ts";
 import { proxy } from "./proxy.ts";
 import { GatewayError, bodyTooLarge, corsHeaders } from "./lib.ts";
-import { loadUserTools } from "./user-tools.ts";
+import { loadMcpPolicy } from "./keys.ts";
+import { loadPublicSkill, publicSkillText } from "./public-skill.ts";
+import { loadUserTools, resolveCaller } from "./user-tools.ts";
 import { appendSystemText } from "./user-skills.ts";
 
 export async function proxySkills(
@@ -28,8 +30,16 @@ export async function proxySkills(
   const payload = await request.json().catch(() => null);
   const body = assertJsonBody(payload);
   const { config, enabled } = await loadLiveSkills(env);
-  const user = await loadUserTools(request, env, rest);
+  const caller = rest === "messages" || rest === "chat/completions" ? await resolveCaller(request, env) : null;
+  const user = await loadUserTools(request, env, rest, caller);
   try {
+    if (caller) {
+      const publicConfig = await loadPublicSkill(env.KEYS);
+      const needsPolicy = caller.surface === "frontend" && publicConfig.frontend.enabled;
+      const mcpEnabled = needsPolicy ? (await loadMcpPolicy(env.KEYS)).enabled : true;
+      const text = publicSkillText(publicConfig, caller.surface, { mcpEnabled });
+      if (text) appendSystemText(body, rest, text);
+    }
     const mine = new Set(injectHostedSkills(body, rest, enabled, user?.tools ?? []));
     if (user?.catalog && mine.has("load_skill")) appendSystemText(body, rest, user.catalog);
     const allow = [...enabled, ...mine];

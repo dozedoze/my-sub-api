@@ -35,7 +35,7 @@
         <a class="nav on" href="/admin/keys" data-nav="keys" aria-current="page">分发账号</a>
         <a class="nav" href="/admin/users" data-nav="users">用户配置</a>
         <a class="nav" href="/admin/upstream" data-nav="upstream">上游账号</a>
-        <a class="nav" href="/admin/skills" data-nav="skills">联网与 MCP 开关</a>
+        <a class="nav" href="/admin/skills" data-nav="skills">公共 Skill 与 MCP</a>
         <a class="nav" href="/admin/guide" data-nav="guide">接入指南</a>
       </nav>
       <button class="ghost" type="button" id="logout">退出</button>
@@ -92,10 +92,30 @@
 
       <section data-page="skills" hidden>
         <header class="page-head">
-          <h1>联网与 MCP 开关</h1>
-          <p class="sub">管理员总开关：模型能不能联网，用户能不能接自己的 MCP。只在聊天页（以及接口地址写成 …/v1/skill 的客户端）生效，Cursor 等直接用 /v1 的客户端不受影响。</p>
+          <h1>公共 Skill 与 MCP</h1>
+          <p class="sub">管理员总开关：公共提示、模型能不能联网、用户能不能接自己的 MCP。只在聊天页（以及接口地址写成 …/v1/skill 的客户端）生效，Cursor 等直接用 /v1 的客户端不受影响。</p>
         </header>
         <div class="page-body">
+        <section class="card">
+          <h2>公共 Skill（追加到 system 的提示）</h2>
+          <p class="hint">分两层。前台是聊天页（登录后用 Cookie 访问），告诉模型现在是网页对话，以及怎么帮用户配置 MCP 和 Skill，一般要开。API Key 是拿 Key 直接调用 …/v1/skill 的客户端，它们通常自带 system，一般不需要，默认关闭。内容空着或和默认一致时，会跟着程序里的默认内容更新。</p>
+          <label class="check"><input type="checkbox" id="pub-frontend-enabled" /> 前台（聊天页）</label>
+          <div class="field" style="margin-top:8px">
+            <textarea id="pub-frontend-text" rows="14" spellcheck="false"></textarea>
+          </div>
+          <div class="actions" style="justify-content:flex-start;margin-bottom:12px">
+            <button type="button" class="ghost" id="pub-frontend-reset">恢复默认内容</button>
+          </div>
+          <label class="check"><input type="checkbox" id="pub-apikey-enabled" /> API Key（接口客户端）</label>
+          <div class="field" style="margin-top:8px">
+            <textarea id="pub-apikey-text" rows="4" spellcheck="false" placeholder="没有默认内容。需要给所有 API Key 调用统一加一段提示时再写。"></textarea>
+          </div>
+          <p class="hint" id="pub-hint"></p>
+          <p class="err" id="pub-err"></p>
+          <div class="actions" style="justify-content:flex-start">
+            <button type="button" id="pub-save">保存</button>
+          </div>
+        </section>
         <section class="card">
           <h2>让模型联网（所有用户共用）</h2>
           <p class="hint" id="skills-search-hint"></p>

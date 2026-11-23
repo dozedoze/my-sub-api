@@ -1,5 +1,5 @@
 const PAGES = ["keys", "users", "upstream", "skills", "guide"];
-const PAGE_TITLE = { keys: "分发账号管理", users: "用户配置", upstream: "上游账号", skills: "联网与 MCP 开关", guide: "接入指南" };
+const PAGE_TITLE = { keys: "分发账号管理", users: "用户配置", upstream: "上游账号", skills: "公共 Skill 与 MCP", guide: "接入指南" };
 const PAGE_FROM_SLUG = {
   keys: "keys", users: "users", upstream: "upstream", skills: "skills", guide: "guide",
   密钥: "keys", 用户: "users", 上游: "upstream", 接入: "guide",

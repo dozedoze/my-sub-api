@@ -185,7 +185,8 @@ Settings → Models → 打开 Override OpenAI Base URL → 填 `https://<worker
 - **密钥不明文存**：Authorization 等敏感头和 URL 里的 token 只能写成 `${secret:NAME}`，明文会被拒绝。密钥用 AES-256-GCM 加密，主密钥是 Worker secret `USER_SECRETS_KEY`，密文绑定用户和名字。接口永远不回传密钥值。没配置主密钥时拒绝保存密钥。
 - **导入兼容各家 mcp.json**：Cursor、Claude Desktop / Code、VS Code（`servers`、`${input:x}`）、opencode、Anthropic API 的 `mcp_servers`。明文 token 会自动抽成密钥，`${env:X}` 会换成 `${secret:X}`。
 - **Skill 只做指令包**：名称、描述常驻 system，正文由模型调用 `load_skill` 按需读取。不执行脚本。
-- **管理员开关**：后台「通用 Skill」页可以整体关闭用户 MCP，并设置域名白名单、黑名单。关掉后用户的 Skill 仍然生效。
+- **管理员开关**：后台「公共 Skill 与 MCP」页可以整体关闭用户 MCP，并设置域名白名单、黑名单。关掉后用户的 Skill 仍然生效。
+- **公共 Skill（system 提示）**：同一页还能编辑一段所有人共用的提示，分两层，追加在客户端自己的 system 后面。**前台**（聊天页 Cookie 登录）默认开启，内置内容告诉模型现在是网页对话，并教它怎么指导用户在「扩展」里配置 MCP 和 Skill（只支持公网 https 的远程 MCP、密钥用 `${secret:NAME}`、默认只读、Skill 的名称和描述怎么写）；管理员关了 MCP 时会自动补一句。**API Key**（带 Key 调 `/v1/skill/*`）默认关闭、没有内容，这类客户端一般自带 system。内容留空或和内置默认一致就跟着程序更新。接口 `GET / PUT /admin/api/public-skill`。
 
 接口（聊天 cookie 登录，写操作要求 Origin 是聊天页）：
 

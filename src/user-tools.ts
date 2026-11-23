@@ -4,6 +4,7 @@ import { loadMcpPolicy, lookupByPlaintext } from "./keys.ts";
 import { extractToken, GATE, throwIfAdmitFailed } from "./lib.ts";
 import { McpHub } from "./mcp.ts";
 import { mcpStore } from "./mcp-store.ts";
+import type { PublicSkillSurface } from "./public-skill.ts";
 import type { ToolCall, ToolDef } from "./skills.ts";
 import type { SkillConfig } from "./user-config.ts";
 import { LOAD_SKILL_TOOL, loadSkillTool, runLoadSkill, skillCatalogText } from "./user-skills.ts";
@@ -16,19 +17,26 @@ export type UserTools = {
   close(): Promise<void>;
 };
 
-export async function resolveCaller(request: Request, env: Env): Promise<{ id: string } | null> {
+export type Caller = { id: string; surface: PublicSkillSurface };
+
+/** 带 Key 的是 API 客户端；没带 Key、靠聊天页 cookie 登录的是前台。 */
+export async function resolveCaller(request: Request, env: Env): Promise<Caller | null> {
   const token = extractToken(request);
   const found = token ? await lookupByPlaintext(env.KEYS, token) : await sessionUser(request, env);
-  return found ? { id: found.id } : null;
+  return found ? { id: found.id, surface: token ? "apikey" : "frontend" } : null;
 }
 
 /**
  * 只在 messages 和 chat/completions 上生效；别的协议保持原样。
  * 没有可用配置、管理员关了 MCP、或者调用方不是已登录用户时返回 null。
  */
-export async function loadUserTools(request: Request, env: Env, rest: string): Promise<UserTools | null> {
+export async function loadUserTools(
+  request: Request,
+  env: Env,
+  rest: string,
+  caller: Caller | null,
+): Promise<UserTools | null> {
   if (rest !== "messages" && rest !== "chat/completions") return null;
-  const caller = await resolveCaller(request, env);
   if (!caller) return null;
   const doc = await userConfig(env, caller.id).getDoc();
   const policy = await loadMcpPolicy(env.KEYS);

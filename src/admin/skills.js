@@ -9,7 +9,55 @@ function fillSkills(status) {
     ? "搜索服务已配置，联网搜索可用。"
     : "还没配搜索服务的密钥（TAVILY_API_KEY 或 BRAVE_API_KEY），联网搜索暂时不会生效。";
   fillMcpPolicy(status.mcpPolicy);
+  fillPublicSkill(status.publicSkill);
 }
+
+let publicDefaults = { frontend: "", apikey: "" };
+
+function fillPublicSkill(view) {
+  if (!view) return;
+  publicDefaults = view.defaults || publicDefaults;
+  document.getElementById("pub-frontend-enabled").checked = view.frontend.enabled;
+  document.getElementById("pub-frontend-text").value = view.frontend.text;
+  document.getElementById("pub-apikey-enabled").checked = view.apikey.enabled;
+  document.getElementById("pub-apikey-text").value = view.apikey.text;
+  document.getElementById("pub-frontend-text").maxLength = view.maxChars || 8000;
+  document.getElementById("pub-apikey-text").maxLength = view.maxChars || 8000;
+  document.getElementById("pub-hint").textContent = view.frontend.isDefault
+    ? "前台现在用的是内置默认内容。"
+    : "前台现在用的是你改过的内容。";
+}
+
+async function savePublicSkill() {
+  const body = {
+    frontend: {
+      enabled: document.getElementById("pub-frontend-enabled").checked,
+      text: document.getElementById("pub-frontend-text").value,
+    },
+    apikey: {
+      enabled: document.getElementById("pub-apikey-enabled").checked,
+      text: document.getElementById("pub-apikey-text").value,
+    },
+  };
+  fillPublicSkill(await api("/admin/api/public-skill", { method: "PUT", body: JSON.stringify(body) }));
+}
+
+document.getElementById("pub-frontend-reset").onclick = () => {
+  document.getElementById("pub-frontend-text").value = publicDefaults.frontend;
+};
+
+document.getElementById("pub-save").onclick = async () => {
+  const btn = document.getElementById("pub-save");
+  await withBusy(btn, async () => {
+    const err = document.getElementById("pub-err");
+    err.textContent = "";
+    try {
+      await savePublicSkill();
+    } catch (e) {
+      err.textContent = e.message || String(e);
+    }
+  });
+};
 
 function fillMcpPolicy(policy) {
   if (!policy) return;

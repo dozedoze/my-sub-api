@@ -2,6 +2,7 @@ import { describeUserConfig } from "./admin-users.ts";
 import { currentAuto, parseAutoRoute, type AutoRoute } from "./auto";
 import { quotaBoard, userConfig } from "./durable";
 import { parseMcpPolicy } from "./net-guard.ts";
+import { loadPublicSkill, parsePublicSkill, publicSkillView, savePublicSkill } from "./public-skill.ts";
 import { secretsConfigured } from "./secrets.ts";
 import {
   banUpstream,
@@ -110,6 +111,7 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
         skillsCatalog: [...HOSTED_SKILL_IDS],
         searchConfigured: searchConfigured(env),
         mcpPolicy: { ...(await loadMcpPolicy(env.KEYS)), secretsConfigured: secretsConfigured(env) },
+        publicSkill: publicSkillView(await loadPublicSkill(env.KEYS)),
       },
       { headers: corsHeaders(request) },
     );
@@ -220,6 +222,17 @@ export async function adminApi(request: Request, env: Env, path: string): Promis
       const config = parseSkillsConfig(body);
       await saveSkills(env.KEYS, config);
       return Response.json({ ...config, saved: true, searchConfigured: searchConfigured(env) }, { headers: corsHeaders(request) });
+    }
+  }
+
+  if (path === "/admin/api/public-skill") {
+    if (request.method === "GET") {
+      return Response.json(publicSkillView(await loadPublicSkill(env.KEYS)), { headers: corsHeaders(request) });
+    }
+    if (request.method === "PUT" || request.method === "POST") {
+      const config = parsePublicSkill(await request.json().catch(() => null));
+      await savePublicSkill(env.KEYS, config);
+      return Response.json({ ...publicSkillView(config), saved: true }, { headers: corsHeaders(request) });
     }
   }
 

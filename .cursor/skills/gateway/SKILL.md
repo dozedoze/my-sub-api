@@ -18,6 +18,8 @@ description: >-
 
 用户自己的 MCP / Skill 也只挂在 `/v1/skill/*`，由网关做 MCP 客户端（`mcp.ts`）。兼容性在网关消化：配置格式、传输协议、协议版本、工具名和 schema 的差异都在这里处理，别让前端或模型去适配某个 MCP server。不要为某个具体的 MCP server 写分支。
 
+公共 Skill（`public-skill.ts`）是管理员写的 system 提示，分 `frontend`（聊天页 cookie）和 `apikey`（带 Key 调用）两层，按调用方是否带 Key 区分。前台默认开，内置内容说明页面形态和怎么配 MCP / Skill；API Key 默认关。用户 MCP / Skill 的规则（限制、密钥占位符、只读默认）变了，要同步改 `frontendDefaultText`，否则模型会指导用户做不通的事。
+
 用户 MCP 的安全底线，改动时不要放松：
 
 - 出站地址一律过 `net-guard.ts`，不要绕开直接 `fetch`。

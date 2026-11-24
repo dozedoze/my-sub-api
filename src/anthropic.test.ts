@@ -751,6 +751,22 @@ test("responses hosted tool calls become gateway blocks only when reporting", as
   assert.equal(blocks[2].type, "text");
 });
 
+test("responses hosted call waits for a non-empty query before sending its input", async () => {
+  const raw = [
+    'data: {"type":"response.created","response":{"id":"r1","model":"grok-4.7"}}\n\n',
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"in_progress","action":{"type":"search","query":""}}}\n\n',
+    'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"GTA 6 评价"}}}\n\n',
+    'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+  ].join("");
+  const events = await collectResponsesSseWith(raw, { report: true });
+  const deltas = events.filter((e) => e.event === "content_block_delta");
+  assert.equal(deltas.length, 1);
+  assert.deepEqual(JSON.parse(String((deltas[0].data.delta as Record<string, unknown>).partial_json)), {
+    action: "search",
+    query: "GTA 6 评价",
+  });
+});
+
 test("responses reasoning streams as a thinking block before the text", async () => {
   const item = { type: "reasoning", id: "rs_1", encrypted_content: "cipher", summary: [{ type: "summary_text", text: "想一想" }] };
   const raw = [

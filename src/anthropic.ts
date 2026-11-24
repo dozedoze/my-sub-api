@@ -1182,6 +1182,16 @@ function hostedCallInput(item: Record<string, unknown>): Record<string, unknown>
   return out;
 }
 
+/** 入参里除了 action 之外有没有非空内容；只有空字符串、空数组的壳不算。 */
+function hasHostedInputDetail(input: Record<string, unknown>): boolean {
+  return Object.entries(input).some(([key, value]) => {
+    if (key === "action") return false;
+    if (typeof value === "string") return value.trim() !== "";
+    if (Array.isArray(value)) return value.length > 0;
+    return value !== null && value !== undefined;
+  });
+}
+
 /** 上游不一定返回结果正文：有来源就列出链接，否则只给状态。 */
 function hostedCallResult(item: Record<string, unknown>): { content: string; is_error: boolean } {
   const status = typeof item.status === "string" ? item.status : "";
@@ -1264,7 +1274,9 @@ export function responsesSseToAnthropic(
       );
     }
     const input = hostedCallInput(item);
-    if (!call.inputSent && Object.keys(input).length) {
+    // 开始事件里的 action 常常只有 {type:"search", query:""} 这样的空壳，前端又只认第一次下发的入参，
+    // 所以等到有实际内容（搜索词、链接等）再发；到结束事件还是没有，就把手上有的发出去。
+    if (!call.inputSent && Object.keys(input).length && (done || hasHostedInputDetail(input))) {
       call.inputSent = true;
       controller.enqueue(
         sseEvent("content_block_delta", {

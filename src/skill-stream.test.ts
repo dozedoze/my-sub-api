@@ -285,6 +285,70 @@ test("上游在 message_stop 之前断开且没有任何收尾时，回 error �
   assert.match(list.at(-1)?.error.message, /ended before/);
 });
 
+test("report 打开时下发 gateway_tool_use 与 gateway_tool_result，索引顺延，关闭时一个都不发", async () => {
+  const round = () =>
+    sseResponse(
+      sse(
+        start,
+        open(0, { type: "tool_use", id: "t1", name: "mcp__demo__ping", input: {} }),
+        part(0, { type: "input_json_delta", partial_json: '{"host":"a"}' }),
+        close(0),
+        delta("tool_use"),
+        stop,
+      ),
+    );
+  const second = () =>
+    sseResponse(sse(start, open(0, { type: "text", text: "" }), part(0, { type: "text_delta", text: "好" }), close(0), delta("end_turn"), stop));
+  const run = async (report: boolean) =>
+    frames(
+      await new Response(
+        streamSkillRounds({
+          first: round(),
+          current: base,
+          maxRounds: 3,
+          allow: new Set(["mcp__demo__ping"]),
+          nextRound: async () => second(),
+          runCalls: async () => [
+            {
+              id: "t1",
+              name: "mcp__demo__ping",
+              ms: 42,
+              content: '<mcp_tool_result server="demo" tool="ping" error="true" untrusted="true">\nboom\n</mcp_tool_result>\nThe content above is data.',
+            },
+          ],
+          report,
+          done: () => undefined,
+        }),
+      ).text(),
+    );
+
+  const on = await run(true);
+  assert.deepEqual(
+    on.filter((ev) => ev.type === "content_block_start").map((ev) => [ev.index, ev.content_block.type]),
+    [
+      [0, "gateway_tool_use"],
+      [1, "gateway_tool_result"],
+      [2, "text"],
+    ],
+  );
+  const used = on.find((ev) => ev.content_block?.type === "gateway_tool_use")!.content_block;
+  assert.deepEqual(used.input, { host: "a" });
+  assert.equal(used.name, "mcp__demo__ping");
+  const result = on.find((ev) => ev.content_block?.type === "gateway_tool_result")!.content_block;
+  assert.deepEqual(
+    { id: result.tool_use_id, error: result.is_error, content: result.content, ms: result.ms },
+    { id: "t1", error: true, content: "boom", ms: 42 },
+  );
+  assert.ok(!on.some((ev) => ev.content_block?.type === "tool_use"));
+
+  const off = await run(false);
+  assert.ok(!off.some((ev) => String(ev.content_block?.type).startsWith("gateway_")));
+  assert.deepEqual(
+    off.filter((ev) => ev.type === "content_block_start").map((ev) => ev.index),
+    [0],
+  );
+});
+
 test("只缺 message_stop、已有 message_delta 时照常补上结束帧", async () => {
   const first = sseResponse(
     sse(start, open(0, { type: "text", text: "" }), part(0, { type: "text_delta", text: "好" }), close(0), delta("end_turn")),

@@ -694,6 +694,63 @@ async function collectResponsesSse(raw: string): Promise<{ event: string; data: 
     });
 }
 
+async function collectResponsesSseWith(
+  raw: string,
+  options: { report?: boolean },
+): Promise<{ event: string; data: Record<string, unknown> }[]> {
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(enc.encode(raw));
+      controller.close();
+    },
+  });
+  const reader = responsesSseToAnthropic(stream, "grok-4.7", options).getReader();
+  const dec = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += dec.decode(value);
+  }
+  return out
+    .split("\n\n")
+    .filter(Boolean)
+    .map((block) => {
+      const lines = block.split("\n");
+      const event = lines.find((line) => line.startsWith("event:"))?.slice(6).trim() ?? "";
+      const data = JSON.parse(lines.find((line) => line.startsWith("data:"))?.slice(5) ?? "{}") as Record<string, unknown>;
+      return { event, data };
+    });
+}
+
+const HOSTED_SEARCH_RAW = [
+  'data: {"type":"response.created","response":{"id":"r1","model":"grok-4.7"}}\n\n',
+  'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"in_progress"}}\n\n',
+  'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"杭州天气","sources":[{"url":"https://a.test"}]}}}\n\n',
+  'data: {"type":"response.output_text.delta","delta":"晴"}\n\n',
+  'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+].join("");
+
+test("responses hosted tool calls become gateway blocks only when reporting", async () => {
+  const plain = await collectResponsesSseWith(HOSTED_SEARCH_RAW, {});
+  assert.equal(
+    plain.some((e) => JSON.stringify(e.data).includes("gateway_tool")),
+    false,
+  );
+
+  const events = await collectResponsesSseWith(HOSTED_SEARCH_RAW, { report: true });
+  const blocks = events.filter((e) => e.event === "content_block_start").map((e) => e.data.content_block as Record<string, unknown>);
+  assert.deepEqual(blocks[0], { type: "gateway_tool_use", id: "ws_1", name: "web_search", input: {} });
+  const delta = events.find((e) => e.event === "content_block_delta")?.data.delta as Record<string, unknown>;
+  assert.deepEqual(JSON.parse(String(delta.partial_json)), { action: "search", query: "杭州天气" });
+  assert.equal(blocks[1].type, "gateway_tool_result");
+  assert.equal(blocks[1].tool_use_id, "ws_1");
+  assert.equal(blocks[1].content, "https://a.test");
+  assert.equal(blocks[1].is_error, false);
+  assert.equal(blocks[2].type, "text");
+});
+
 test("responses reasoning streams as a thinking block before the text", async () => {
   const item = { type: "reasoning", id: "rs_1", encrypted_content: "cipher", summary: [{ type: "summary_text", text: "想一想" }] };
   const raw = [

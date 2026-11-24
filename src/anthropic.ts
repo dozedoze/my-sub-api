@@ -1154,7 +1154,63 @@ export function chatSseToAnthropic(stream: ReadableStream<Uint8Array>, model: st
   return pumpSse(stream, { line: onLine, end: finish });
 }
 
-export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, model: string): ReadableStream<Uint8Array> {
+/** 上游自己执行的工具调用项（web_search_call、x_search_call、code_interpreter_call…）；函数调用由客户端执行，不算。 */
+const CLIENT_CALL_ITEMS = new Set(["function_call", "custom_tool_call"]);
+
+function hostedCallName(item: Record<string, unknown>): string | null {
+  const type = item.type;
+  if (typeof type !== "string" || !type.endsWith("_call") || CLIENT_CALL_ITEMS.has(type)) return null;
+  return type.slice(0, -"_call".length) || null;
+}
+
+const HOSTED_CALL_META = new Set(["id", "type", "status", "results", "outputs", "output", "sources", "call_id"]);
+
+/** 展示用入参：有 action 就展开 action（去掉来源列表），否则取项上除元数据外的字段。 */
+function hostedCallInput(item: Record<string, unknown>): Record<string, unknown> {
+  const action = asRecord(item.action);
+  const out: Record<string, unknown> = {};
+  if (action) {
+    for (const [key, value] of Object.entries(action)) {
+      if (key === "sources") continue;
+      out[key === "type" ? "action" : key] = value;
+    }
+    return out;
+  }
+  for (const [key, value] of Object.entries(item)) {
+    if (!HOSTED_CALL_META.has(key)) out[key] = value;
+  }
+  return out;
+}
+
+/** 上游不一定返回结果正文：有来源就列出链接，否则只给状态。 */
+function hostedCallResult(item: Record<string, unknown>): { content: string; is_error: boolean } {
+  const status = typeof item.status === "string" ? item.status : "";
+  const sources = asRecord(item.action)?.sources;
+  const urls = Array.isArray(sources)
+    ? sources.flatMap((source) => {
+        const url = asRecord(source)?.url;
+        return typeof url === "string" && url ? [url] : [];
+      })
+    : [];
+  return {
+    content: urls.length ? urls.join("\n") : status,
+    is_error: status === "failed" || status === "incomplete",
+  };
+}
+
+export type ResponsesSseOptions = {
+  /**
+   * 为聊天前端额外下发上游自己执行的工具调用（gateway_tool_use / gateway_tool_result），仅用于展示。
+   * 默认关闭：API Key 客户端按标准 Anthropic 事件解析，不认识的内容块可能让它们报错。
+   */
+  report?: boolean;
+};
+
+export function responsesSseToAnthropic(
+  stream: ReadableStream<Uint8Array>,
+  model: string,
+  options: ResponsesSseOptions = {},
+): ReadableStream<Uint8Array> {
   const state: SseState = {
     started: false,
     closed: false,
@@ -1180,6 +1236,65 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
   let thinkIndex = -1;
   let thinkStreamed = false;
   let summaryIndex = -1;
+  /** 上游自己执行、还没结束的工具调用块 */
+  const hostedCalls = new Map<string, { block: number; startedAt: number; inputSent: boolean }>();
+
+  /** 上游工具调用项：开始时先下发调用块，让前端立刻看到「调用中」；入参到了补一次增量，结束时补结果块。 */
+  const reportHostedCall = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    item: Record<string, unknown>,
+    name: string,
+    outputIndex: number | undefined,
+    done: boolean,
+  ) => {
+    const id = typeof item.id === "string" && item.id ? item.id : `${name}_${outputIndex ?? state.next}`;
+    let call = hostedCalls.get(id);
+    if (!call) {
+      ensureStart(controller);
+      closeThinking(controller);
+      closeText(controller);
+      call = { block: state.next++, startedAt: Date.now(), inputSent: false };
+      hostedCalls.set(id, call);
+      controller.enqueue(
+        sseEvent("content_block_start", {
+          type: "content_block_start",
+          index: call.block,
+          content_block: { type: "gateway_tool_use", id, name, input: {} },
+        }),
+      );
+    }
+    const input = hostedCallInput(item);
+    if (!call.inputSent && Object.keys(input).length) {
+      call.inputSent = true;
+      controller.enqueue(
+        sseEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: call.block,
+          delta: { type: "input_json_delta", partial_json: JSON.stringify(input) },
+        }),
+      );
+    }
+    if (!done) return;
+    controller.enqueue(sseEvent("content_block_stop", { type: "content_block_stop", index: call.block }));
+    hostedCalls.delete(id);
+    const result = hostedCallResult(item);
+    const block = state.next++;
+    controller.enqueue(
+      sseEvent("content_block_start", {
+        type: "content_block_start",
+        index: block,
+        content_block: {
+          type: "gateway_tool_result",
+          tool_use_id: id,
+          name,
+          is_error: result.is_error,
+          content: result.content,
+          ms: Date.now() - call.startedAt,
+        },
+      }),
+    );
+    controller.enqueue(sseEvent("content_block_stop", { type: "content_block_stop", index: block }));
+  };
 
   const rememberReasoning = (item: Record<string, unknown> | null) => {
     if (!item || item.type !== "reasoning") return;
@@ -1292,6 +1407,10 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
       controller.enqueue(sseEvent("content_block_stop", { type: "content_block_stop", index }));
     }
     state.tools.clear();
+    for (const call of hostedCalls.values()) {
+      controller.enqueue(sseEvent("content_block_stop", { type: "content_block_stop", index: call.block }));
+    }
+    hostedCalls.clear();
     emitReasoning(controller);
     controller.enqueue(
       sseEvent("message_delta", {
@@ -1328,6 +1447,14 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
     }
     if (json.type === "response.output_item.added" || json.type === "response.output_item.done") {
       rememberReasoning(asRecord(json.item));
+    }
+    if (options.report && (json.type === "response.output_item.added" || json.type === "response.output_item.done")) {
+      const item = asRecord(json.item);
+      const name = item ? hostedCallName(item) : null;
+      if (item && name) {
+        reportHostedCall(controller, item, name, num(json.output_index) ?? undefined, json.type === "response.output_item.done");
+        return;
+      }
     }
     if (
       (json.type === "response.reasoning_summary_text.delta" || json.type === "response.reasoning_text.delta") &&

@@ -47,6 +47,7 @@ export async function proxySkills(
       const text = publicSkillText(publicConfig, caller.surface, { mcpEnabled, userText });
       if (text) appendSystemText(body, rest, text);
     }
+    const frontend = caller?.surface === "frontend";
     const gatewaySearch = rest === "messages" && willInjectSearch(body, enabled);
     const mine = new Set(injectHostedSkills(body, rest, enabled, user?.tools ?? []));
     if (user?.catalog && mine.has("load_skill")) appendSystemText(body, rest, user.catalog);
@@ -54,18 +55,18 @@ export async function proxySkills(
     const wantStream = body.stream === true;
     const runCalls = (calls: ToolCall[]) =>
       Promise.all(
-        calls.map(async (call) => ({
-          id: call.id,
-          name: call.name,
-          content: user && mine.has(call.name) ? await user.run(call) : await runHostedSkill(env, call),
-        })),
+        calls.map(async (call) => {
+          const started = Date.now();
+          const content = user && mine.has(call.name) ? await user.run(call) : await runHostedSkill(env, call);
+          return { id: call.id, name: call.name, content, ms: Date.now() - started };
+        }),
       );
     let current: Record<string, unknown> = { ...body, stream: false };
     // /messages 逐轮流式请求上游，思考与正文边生成边下发；其余路径仍等整轮结束。
     let pending: Response | null = null;
     if (wantStream && rest === "messages") {
       current = { ...body, stream: true };
-      const first = await proxy(copyJsonRequest(request, current, gatewaySearch), env, ctx, rest);
+      const first = await proxy(copyJsonRequest(request, current, gatewaySearch, frontend), env, ctx, rest);
       if (first.ok && first.body && (first.headers.get("content-type") || "").includes("text/event-stream")) {
         const headers = new Headers(first.headers);
         headers.delete("content-length");
@@ -78,8 +79,10 @@ export async function proxySkills(
           current,
           maxRounds: config.maxRounds,
           allow: new Set(allow),
-          nextRound: (next) => proxy(copyJsonRequest(request, next, gatewaySearch), env, ctx, rest),
+          nextRound: (next) => proxy(copyJsonRequest(request, next, gatewaySearch, frontend), env, ctx, rest),
           runCalls,
+          // 只有聊天前端（Cookie 登录）认识这两种展示用内容块。
+          report: frontend,
           done: () => {
             if (user) ctx.waitUntil(user.close().catch(() => undefined));
           },
@@ -93,7 +96,7 @@ export async function proxySkills(
     let lastJson: unknown = null;
     let lastStatus = 200;
     for (let round = 0; round < config.maxRounds; round++) {
-      const res: Response = pending ?? (await proxy(copyJsonRequest(request, current, gatewaySearch), env, ctx, rest));
+      const res: Response = pending ?? (await proxy(copyJsonRequest(request, current, gatewaySearch, frontend), env, ctx, rest));
       pending = null;
       const text = await res.text();
       let json: unknown = text;

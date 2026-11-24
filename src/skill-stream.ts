@@ -1,3 +1,4 @@
+import { summarizeToolResult } from "./skill-report.ts";
 import { appendSkillResults, type ToolCall } from "./skills.ts";
 
 type Json = Record<string, unknown>;
@@ -89,6 +90,8 @@ function toBlock(acc: Acc): Json | null {
       : null;
   }
   if (type === "tool_use") return { ...acc.block, input: toolInput(acc) };
+  // 展示用的块只给前端，不能当成上一轮的 assistant 内容回传给上游。
+  if (type === "gateway_tool_use" || type === "gateway_tool_result") return null;
   return acc.block;
 }
 
@@ -126,7 +129,12 @@ export type SkillStreamOptions = {
   allow: ReadonlySet<string>;
   /** 带着新请求体发起下一轮（stream: true） */
   nextRound: (body: Record<string, unknown>) => Promise<Response>;
-  runCalls: (calls: ToolCall[]) => Promise<{ id: string; name: string; content: string }[]>;
+  runCalls: (calls: ToolCall[]) => Promise<{ id: string; name: string; content: string; ms?: number }[]>;
+  /**
+   * 为聊天前端额外下发网关接手的工具调用与结果（gateway_tool_use / gateway_tool_result），仅用于展示。
+   * 默认关闭：API Key 客户端按标准 Anthropic 事件解析，不认识的内容块可能让它们报错。
+   */
+  report?: boolean;
   /** 流结束（含客户端取消）后收尾 */
   done: () => void;
 };
@@ -218,6 +226,22 @@ export function streamSkillRounds(options: SkillStreamOptions): ReadableStream<U
           } else if (ev.type === "content_block_stop") {
             const acc = accs.get(index);
             if (acc && acc.out !== null) send("content_block_stop", { ...ev, index: acc.out });
+            else if (acc?.hosted && options.report) {
+              // 入参在块结束时才完整；先告诉前端要调用什么，再去执行。
+              ensureStarted();
+              const out = next++;
+              send("content_block_start", {
+                type: "content_block_start",
+                index: out,
+                content_block: {
+                  type: "gateway_tool_use",
+                  id: String(acc.block.id ?? ""),
+                  name: String(acc.block.name),
+                  input: toolInput(acc),
+                },
+              });
+              send("content_block_stop", { type: "content_block_stop", index: out });
+            }
           } else if (ev.type === "message_delta") {
             delta = ev;
           } else if (ev.type === "message_stop") {
@@ -278,6 +302,25 @@ export function streamSkillRounds(options: SkillStreamOptions): ReadableStream<U
           send("ping", { type: "ping" });
           const results = await options.runCalls(outcome.calls);
           if (cancelled) return;
+          if (options.report) {
+            for (const result of results) {
+              const report = summarizeToolResult(result.content);
+              const out = next++;
+              send("content_block_start", {
+                type: "content_block_start",
+                index: out,
+                content_block: {
+                  type: "gateway_tool_result",
+                  tool_use_id: result.id,
+                  name: result.name,
+                  is_error: report.is_error,
+                  content: report.content,
+                  ...(result.ms === undefined ? {} : { ms: result.ms }),
+                },
+              });
+              send("content_block_stop", { type: "content_block_stop", index: out });
+            }
+          }
           current = {
             ...appendSkillResults(current, { content: outcome.content }, results, "messages"),
             stream: true,

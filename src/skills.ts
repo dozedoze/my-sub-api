@@ -19,6 +19,9 @@ export function searchConfigured(env: Env): boolean {
 /** skill 路由挂了网关 web_search 时带给 proxy 的内部头，proxy 按上游决定走托管搜索还是 Worker 搜索。 */
 export const SKILL_SEARCH_HEADER = "x-skill-search";
 
+/** 聊天前端的 skill 请求带给 proxy 的内部头：要求把上游自己执行的工具调用也下发成展示用内容块。 */
+export const SKILL_REPORT_HEADER = "x-skill-report";
+
 /**
  * /messages 上 web_search 不要求 Worker 有搜索 key：上游自己会搜（xAI、OpenAI）就用托管搜索，
  * 由 proxy 在选定上游后换工具；上游不会搜又没有 key 时 proxy 再把它丢掉。
@@ -360,11 +363,13 @@ export async function loadLiveSkills(
   return { config, enabled: liveSkillIds(config, env, upstreamMaySearch) };
 }
 
-export function copyJsonRequest(request: Request, body: unknown, skillSearch = false): Request {
+export function copyJsonRequest(request: Request, body: unknown, skillSearch = false, report = false): Request {
   const headers = new Headers(request.headers);
   headers.set("content-type", "application/json");
   headers.delete(SKILL_SEARCH_HEADER);
   if (skillSearch) headers.set(SKILL_SEARCH_HEADER, "1");
+  headers.delete(SKILL_REPORT_HEADER);
+  if (report) headers.set(SKILL_REPORT_HEADER, "1");
   headers.delete("content-length");
   return new Request(request.url, { method: "POST", headers, body: JSON.stringify(body) });
 }

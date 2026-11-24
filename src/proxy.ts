@@ -19,7 +19,7 @@ import {
   type InlinedFile,
   type MessagesWire,
 } from "./anthropic";
-import { searchConfigured, SKILL_SEARCH_HEADER } from "./skills";
+import { searchConfigured, SKILL_REPORT_HEADER, SKILL_SEARCH_HEADER } from "./skills";
 import { autoContextWindow, currentAuto, isAutoModel, planAuto, type AutoRoute, type AutoVia } from "./auto";
 import {
   shapeAnthropicThinking,
@@ -91,6 +91,7 @@ const HOP = new Set([
   "x-api-key",
   "api-key",
   SKILL_SEARCH_HEADER,
+  SKILL_REPORT_HEADER,
 ]);
 
 async function rejectAnon(board: DurableObjectStub<QuotaBoard>, ip: string, message: string): Promise<never> {
@@ -179,6 +180,7 @@ async function proxyAfterGate(
   const fileCache = new Map<string, InlinedFile>();
   /** 只有 /v1/skill/* 挂了网关的 web_search 才会带这个头。 */
   const skillSearch = rest === "messages" && request.headers.get(SKILL_SEARCH_HEADER) === "1";
+  const skillReport = rest === "messages" && request.headers.get(SKILL_REPORT_HEADER) === "1";
 
   if (isRawRest(rest)) {
     return rawUpstream(request, env, rest, { issued, live, map, blocked, board, hold });
@@ -477,7 +479,7 @@ async function proxyAfterGate(
           estimate: chargeEstimate(rest, payload ?? rest),
         },
       };
-      if (wire === "chat" || wire === "responses") return anthropicFromChat(upstream, ctx, handed, wire);
+      if (wire === "chat" || wire === "responses") return anthropicFromChat(upstream, ctx, handed, wire, skillReport);
       return passthrough(upstream, ctx, handed);
     }
   }
@@ -601,6 +603,7 @@ async function anthropicFromChat(
   ctx: ExecutionContext,
   session: Handed,
   wire: "chat" | "responses",
+  skillReport = false,
 ): Promise<Response> {
   if (!upstream.body || upstream.status >= 400) {
     const text = upstream.body ? await upstream.text() : "";
@@ -628,7 +631,11 @@ async function anthropicFromChat(
     ctx.waitUntil(consumeSse(toParse, session.sessionStub, session.prior, session.meter, true));
     headers.set("content-type", "text/event-stream; charset=utf-8");
     headers.set("cache-control", "no-cache");
-    return new Response((wire === "responses" ? responsesSseToAnthropic : chatSseToAnthropic)(toClient, session.meter.model), {
+    const converted =
+      wire === "responses"
+        ? responsesSseToAnthropic(toClient, session.meter.model, { report: skillReport })
+        : chatSseToAnthropic(toClient, session.meter.model);
+    return new Response(converted, {
       status: upstream.status,
       headers,
     });

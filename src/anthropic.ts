@@ -917,7 +917,10 @@ export function pumpSse(
           controller.enqueue(
             sseEvent("error", {
               type: "error",
-              error: { type: "api_error", message: err instanceof Error ? err.message : "Upstream stream interrupted" },
+              error: {
+                type: "overloaded_error",
+                message: err instanceof Error ? err.message : "Upstream stream interrupted",
+              },
             }),
           );
           controller.close();

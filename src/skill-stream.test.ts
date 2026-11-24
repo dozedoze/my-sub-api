@@ -266,3 +266,39 @@ test("轮次用尽时不再等待工具结果，以 end_turn 收尾", async () =
   assert.equal(list.find((ev) => ev.type === "message_delta")?.delta.stop_reason, "end_turn");
   assert.equal(list.at(-1)?.type, "message_stop");
 });
+
+test("上游在 message_stop 之前断开且没有任何收尾时，回 error 事件而不是静默关流", async () => {
+  const first = sseResponse(sse(start, open(0, { type: "text", text: "" }), part(0, { type: "text_delta", text: "半" })));
+  const out = await new Response(
+    streamSkillRounds({
+      first,
+      current: base,
+      maxRounds: 3,
+      allow: new Set(["web_search"]),
+      nextRound: async () => assert.fail("不应发起下一轮"),
+      runCalls: noCalls,
+      done: () => undefined,
+    }),
+  ).text();
+  const list = frames(out);
+  assert.equal(list.at(-1)?.type, "error");
+  assert.match(list.at(-1)?.error.message, /ended before/);
+});
+
+test("只缺 message_stop、已有 message_delta 时照常补上结束帧", async () => {
+  const first = sseResponse(
+    sse(start, open(0, { type: "text", text: "" }), part(0, { type: "text_delta", text: "好" }), close(0), delta("end_turn")),
+  );
+  const out = await new Response(
+    streamSkillRounds({
+      first,
+      current: base,
+      maxRounds: 3,
+      allow: new Set(["web_search"]),
+      nextRound: async () => assert.fail("不应发起下一轮"),
+      runCalls: noCalls,
+      done: () => undefined,
+    }),
+  ).text();
+  assert.equal(frames(out).at(-1)?.type, "message_stop");
+});

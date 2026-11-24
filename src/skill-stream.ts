@@ -240,19 +240,26 @@ export function streamSkillRounds(options: SkillStreamOptions): ReadableStream<U
         return { content, calls, delta, stopped, errored };
       };
 
-      const fail = (message: string) => {
+      const fail = (message: string, type = "api_error") => {
         ensureStarted();
-        send("error", { type: "error", error: { type: "api_error", message } });
+        send("error", { type: "error", error: { type, message } });
       };
 
+      // 上游思考或工具执行期间可能很久没有数据，整条流存活期间定时发 ping，防止被当成空闲断掉。
+      const keepAlive = setInterval(() => send("ping", { type: "ping" }), PING_MS);
       try {
         let res = options.first;
         let current = options.current;
         for (let round = 0; !cancelled; round++) {
           const outcome = await pump(res);
           if (outcome.errored || cancelled) return;
-          // 上游在 message_stop 之前断开：不补结束帧，让客户端按中断处理。
-          if (!outcome.stopped) return;
+          // 已经收到 message_delta 说明这一轮其实完整了，只是缺 message_stop，照常收尾。
+          // 连 message_delta 都没有就是上游中途断了：回 error 事件，否则前端只会显示「已停止」，看不出原因。
+          if (!outcome.stopped && !outcome.delta) {
+            // overloaded_error 是 Anthropic 约定的「可重试」类型，客户端据此可自动重发。
+            fail("Upstream stream ended before the response completed", "overloaded_error");
+            return;
+          }
           const last = round + 1 >= options.maxRounds;
           if (!outcome.calls.length || last) {
             ensureStarted();
@@ -268,14 +275,8 @@ export function streamSkillRounds(options: SkillStreamOptions): ReadableStream<U
             send("message_stop", { type: "message_stop" });
             return;
           }
-          const timer = setInterval(() => send("ping", { type: "ping" }), PING_MS);
-          let results: { id: string; name: string; content: string }[];
-          try {
-            send("ping", { type: "ping" });
-            results = await options.runCalls(outcome.calls);
-          } finally {
-            clearInterval(timer);
-          }
+          send("ping", { type: "ping" });
+          const results = await options.runCalls(outcome.calls);
           if (cancelled) return;
           current = {
             ...appendSkillResults(current, { content: outcome.content }, results, "messages"),
@@ -297,9 +298,10 @@ export function streamSkillRounds(options: SkillStreamOptions): ReadableStream<U
       } catch (err) {
         if (!cancelled) {
           console.error(JSON.stringify({ message: "skill_stream", error: err instanceof Error ? err.message : String(err) }));
-          fail(err instanceof Error ? err.message : String(err));
+          fail(err instanceof Error ? err.message : String(err), "overloaded_error");
         }
       } finally {
+        clearInterval(keepAlive);
         try {
           options.done();
         } finally {

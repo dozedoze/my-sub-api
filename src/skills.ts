@@ -16,8 +16,16 @@ export function searchConfigured(env: Env): boolean {
   return Boolean(envSecret(env, "TAVILY_API_KEY") || envSecret(env, "BRAVE_API_KEY"));
 }
 
-export function liveSkillIds(config: SkillsConfig, env: Env): HostedSkillId[] {
-  return config.enabled.filter((id) => id !== "web_search" || searchConfigured(env));
+/** skill 路由挂了网关 web_search 时带给 proxy 的内部头，proxy 按上游决定走托管搜索还是 Worker 搜索。 */
+export const SKILL_SEARCH_HEADER = "x-skill-search";
+
+/**
+ * /messages 上 web_search 不要求 Worker 有搜索 key：上游自己会搜（xAI、OpenAI）就用托管搜索，
+ * 由 proxy 在选定上游后换工具；上游不会搜又没有 key 时 proxy 再把它丢掉。
+ * 其他路径的 web_search 只能由 Worker 执行，没有 key 就不挂。
+ */
+export function liveSkillIds(config: SkillsConfig, env: Env, upstreamMaySearch = false): HostedSkillId[] {
+  return config.enabled.filter((id) => id !== "web_search" || upstreamMaySearch || searchConfigured(env));
 }
 
 /** Anthropic 形状的工具声明；chat/completions 时再包成 function。 */
@@ -63,6 +71,17 @@ function openaiTool(skill: ToolDef) {
       parameters: skill.input_schema,
     },
   };
+}
+
+/** 这次请求里网关会不会挂 web_search：启用了，客户端没有同名工具，DeepSeek 也没自带。 */
+export function willInjectSearch(body: Record<string, unknown>, enabled: readonly HostedSkillId[]): boolean {
+  const names = existingNames(body.tools);
+  return (
+    enabled.includes("web_search") &&
+    !names.has("web_search") &&
+    !names.has("deepseek_web_search") &&
+    !names.has("deepseek_read_url")
+  );
 }
 
 function existingNames(tools: unknown): Set<string> {
@@ -333,14 +352,19 @@ export function skillFinalResponse(json: unknown, rest: string, wantStream: bool
   return new Response(body, { status: 200, headers });
 }
 
-export async function loadLiveSkills(env: Env): Promise<{ config: SkillsConfig; enabled: HostedSkillId[] }> {
+export async function loadLiveSkills(
+  env: Env,
+  upstreamMaySearch = false,
+): Promise<{ config: SkillsConfig; enabled: HostedSkillId[] }> {
   const config = await loadSkills(env.KEYS);
-  return { config, enabled: liveSkillIds(config, env) };
+  return { config, enabled: liveSkillIds(config, env, upstreamMaySearch) };
 }
 
-export function copyJsonRequest(request: Request, body: unknown): Request {
+export function copyJsonRequest(request: Request, body: unknown, skillSearch = false): Request {
   const headers = new Headers(request.headers);
   headers.set("content-type", "application/json");
+  headers.delete(SKILL_SEARCH_HEADER);
+  if (skillSearch) headers.set(SKILL_SEARCH_HEADER, "1");
   headers.delete("content-length");
   return new Request(request.url, { method: "POST", headers, body: JSON.stringify(body) });
 }

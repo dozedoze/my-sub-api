@@ -7,6 +7,7 @@ import {
   injectHostedSkills,
   runHostedSkill,
   skillFinalResponse,
+  willInjectSearch,
   type ToolCall,
 } from "./skills.ts";
 import { streamSkillRounds } from "./skill-stream.ts";
@@ -31,7 +32,7 @@ export async function proxySkills(
   if (bodyTooLarge(request, undefined)) throw new GatewayError(413, "invalid_request", "Request body too large");
   const payload = await request.json().catch(() => null);
   const body = assertJsonBody(payload);
-  const { config, enabled } = await loadLiveSkills(env);
+  const { config, enabled } = await loadLiveSkills(env, rest === "messages");
   const caller = rest === "messages" || rest === "chat/completions" ? await resolveCaller(request, env) : null;
   const user = await loadUserTools(request, env, rest, caller);
   /** 流式响应接管了 user 的收尾，这里的 finally 不能再关。 */
@@ -46,6 +47,7 @@ export async function proxySkills(
       const text = publicSkillText(publicConfig, caller.surface, { mcpEnabled, userText });
       if (text) appendSystemText(body, rest, text);
     }
+    const gatewaySearch = rest === "messages" && willInjectSearch(body, enabled);
     const mine = new Set(injectHostedSkills(body, rest, enabled, user?.tools ?? []));
     if (user?.catalog && mine.has("load_skill")) appendSystemText(body, rest, user.catalog);
     const allow = [...enabled, ...mine];
@@ -63,7 +65,7 @@ export async function proxySkills(
     let pending: Response | null = null;
     if (wantStream && rest === "messages") {
       current = { ...body, stream: true };
-      const first = await proxy(copyJsonRequest(request, current), env, ctx, rest);
+      const first = await proxy(copyJsonRequest(request, current, gatewaySearch), env, ctx, rest);
       if (first.ok && first.body && (first.headers.get("content-type") || "").includes("text/event-stream")) {
         const headers = new Headers(first.headers);
         headers.delete("content-length");
@@ -76,7 +78,7 @@ export async function proxySkills(
           current,
           maxRounds: config.maxRounds,
           allow: new Set(allow),
-          nextRound: (next) => proxy(copyJsonRequest(request, next), env, ctx, rest),
+          nextRound: (next) => proxy(copyJsonRequest(request, next, gatewaySearch), env, ctx, rest),
           runCalls,
           done: () => {
             if (user) ctx.waitUntil(user.close().catch(() => undefined));
@@ -91,7 +93,7 @@ export async function proxySkills(
     let lastJson: unknown = null;
     let lastStatus = 200;
     for (let round = 0; round < config.maxRounds; round++) {
-      const res: Response = pending ?? (await proxy(copyJsonRequest(request, current), env, ctx, rest));
+      const res: Response = pending ?? (await proxy(copyJsonRequest(request, current, gatewaySearch), env, ctx, rest));
       pending = null;
       const text = await res.text();
       let json: unknown = text;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseSkillsConfig } from "./keys.ts";
-import { extractHostedCalls, injectHostedSkills, skillFinalResponse } from "./skills.ts";
+import { extractHostedCalls, injectHostedSkills, liveSkillIds, skillFinalResponse, willInjectSearch } from "./skills.ts";
 
 test("parseSkillsConfig keeps known ids", () => {
   assert.deepEqual(parseSkillsConfig({ enabled: ["web_search", "fetch_url", "web_search"], maxRounds: 2 }), {
@@ -48,4 +48,19 @@ test("skillFinalResponse keeps thinking blocks when re-streaming /messages", asy
   assert.match(text, /"signature_delta","signature":"sig"/);
   assert.ok(text.indexOf("thinking_delta") < text.indexOf("text_delta"));
   assert.match(text, /"index":1,"content_block":\{"type":"text"/);
+});
+
+test("web_search needs a Worker key unless the upstream may search itself", () => {
+  const config = { enabled: ["web_search", "fetch_url"] as ("web_search" | "fetch_url")[], maxRounds: 3 };
+  const bare = {} as Env;
+  assert.deepEqual(liveSkillIds(config, bare), ["fetch_url"]);
+  assert.deepEqual(liveSkillIds(config, bare, true), ["web_search", "fetch_url"]);
+  assert.deepEqual(liveSkillIds(config, { TAVILY_API_KEY: "k" } as unknown as Env), ["web_search", "fetch_url"]);
+});
+
+test("willInjectSearch matches what injectHostedSkills mounts", () => {
+  assert.equal(willInjectSearch({ tools: [] }, ["web_search"]), true);
+  assert.equal(willInjectSearch({ tools: [{ name: "web_search" }] }, ["web_search"]), false);
+  assert.equal(willInjectSearch({ tools: [{ name: "deepseek_web_search" }] }, ["web_search"]), false);
+  assert.equal(willInjectSearch({}, ["fetch_url"]), false);
 });

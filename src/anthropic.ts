@@ -466,6 +466,41 @@ function responsesHostedSearch(baseUrl: string, declared?: boolean): boolean {
   return host === "x.ai" || host.endsWith(".x.ai") || host === "openai.com" || host.endsWith(".openai.com");
 }
 
+/** 这个账号的上游会不会自己执行 web_search。只有 Responses 协议才有托管搜索。 */
+export function upstreamHostsSearch(baseUrl: string, wire: MessagesWire, declared?: boolean): boolean {
+  return wire === "responses" && responsesHostedSearch(baseUrl, declared);
+}
+
+/**
+ * 网关挂的 web_search 是函数工具，由 Worker 执行。上游自己会搜就换成托管搜索（不占 Worker 的搜索 key）；
+ * 否则 Worker 没有搜索 key 时它是死工具，丢掉，连同点名它的 tool_choice。
+ */
+export function routeSkillSearch(
+  body: Record<string, unknown>,
+  hosted: boolean,
+  workerSearch: boolean,
+): Record<string, unknown> {
+  if (!Array.isArray(body.tools) || (!hosted && workerSearch)) return body;
+  const isMine = (tool: unknown) => {
+    const rec = asRecord(tool);
+    return rec != null && rec.name === "web_search" && isClientTool(rec);
+  };
+  if (!body.tools.some(isMine)) return body;
+  if (hosted) {
+    const tools = body.tools.map((tool) => (isMine(tool) ? { type: "web_search_20250305", name: "web_search" } : tool));
+    return { ...body, tools };
+  }
+  const tools = body.tools.filter((tool) => !isMine(tool));
+  if (!tools.length) {
+    const { tools: _tools, tool_choice: _choice, ...rest } = body;
+    return rest;
+  }
+  const choice = asRecord(body.tool_choice);
+  return choice?.type === "tool" && choice.name === "web_search"
+    ? { ...body, tools, tool_choice: { type: "auto" } }
+    : { ...body, tools };
+}
+
 function responseTools(tools: unknown, hostedSearch: boolean): unknown[] {
   const out: unknown[] = [];
   if (hostedSearch && Array.isArray(tools)) {

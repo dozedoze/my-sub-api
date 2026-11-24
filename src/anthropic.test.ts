@@ -10,6 +10,8 @@ import {
   messagesToChat,
   messagesToResponses,
   messagesWire,
+  routeSkillSearch,
+  upstreamHostsSearch,
   prepareAnthropic,
   pumpSse,
   relaxToolChoice,
@@ -763,4 +765,31 @@ test("file_id is inlined to base64 then converted for chat and grok", () => {
   ]);
   const dropped = messagesToChat(body);
   assert.deepEqual(dropped.messages, [{ role: "user", content: "what" }]);
+});
+
+test("gateway web_search becomes hosted on xAI and is dropped without a Worker key elsewhere", () => {
+  const gatewayTool = { name: "web_search", description: "d", input_schema: { type: "object" } };
+  const body = {
+    model: "grok-4.6",
+    tools: [gatewayTool, { name: "fetch_url", description: "d", input_schema: { type: "object" } }],
+    tool_choice: { type: "tool", name: "web_search" },
+  };
+  assert.equal(upstreamHostsSearch("https://api.x.ai/v1", "responses"), true);
+  assert.equal(upstreamHostsSearch("https://api.x.ai/v1", "chat"), false);
+  assert.equal(upstreamHostsSearch("https://api.deepseek.com/v1", "anthropic"), false);
+
+  const hosted = routeSkillSearch(body, true, false);
+  assert.deepEqual((hosted.tools as { name: string; type?: string }[])[0], { type: "web_search_20250305", name: "web_search" });
+  const wire = messagesToResponses(hosted, "https://api.x.ai/v1");
+  assert.deepEqual((wire.tools as { type: string }[])[0].type, "web_search");
+
+  assert.equal(routeSkillSearch(body, false, true), body);
+
+  const dropped = routeSkillSearch(body, false, false);
+  assert.deepEqual((dropped.tools as { name: string }[]).map((t) => t.name), ["fetch_url"]);
+  assert.deepEqual(dropped.tool_choice, { type: "auto" });
+
+  const only = routeSkillSearch({ model: "m", tools: [gatewayTool], tool_choice: { type: "tool", name: "web_search" } }, false, false);
+  assert.equal("tools" in only, false);
+  assert.equal("tool_choice" in only, false);
 });

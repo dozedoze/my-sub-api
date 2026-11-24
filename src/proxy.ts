@@ -14,9 +14,12 @@ import {
   prepareAnthropic,
   responsesSseToAnthropic,
   responsesToMessage,
+  routeSkillSearch,
+  upstreamHostsSearch,
   type InlinedFile,
   type MessagesWire,
 } from "./anthropic";
+import { searchConfigured, SKILL_SEARCH_HEADER } from "./skills";
 import { autoContextWindow, currentAuto, isAutoModel, planAuto, type AutoRoute, type AutoVia } from "./auto";
 import {
   shapeAnthropicThinking,
@@ -87,6 +90,7 @@ const HOP = new Set([
   "x-real-ip",
   "x-api-key",
   "api-key",
+  SKILL_SEARCH_HEADER,
 ]);
 
 async function rejectAnon(board: DurableObjectStub<QuotaBoard>, ip: string, message: string): Promise<never> {
@@ -173,6 +177,8 @@ async function proxyAfterGate(
 ): Promise<Response> {
   const { issued, live, map, blocked, aliases, autoRoute, defaultProvider, board, hold } = ctxp;
   const fileCache = new Map<string, InlinedFile>();
+  /** 只有 /v1/skill/* 挂了网关的 web_search 才会带这个头。 */
+  const skillSearch = rest === "messages" && request.headers.get(SKILL_SEARCH_HEADER) === "1";
 
   if (isRawRest(rest)) {
     return rawUpstream(request, env, rest, { issued, live, map, blocked, board, hold });
@@ -341,10 +347,14 @@ async function proxyAfterGate(
         rest === "messages" && bodyRec ? messagesWire(account.baseUrl, picked.model, account.messages) : null;
       const target = wire ? messagesTarget(account.baseUrl, wire) : null;
       let outbound: unknown = payload;
-      const ready =
+      const filed =
         rest === "messages" && bodyRec && wire
           ? await filesForUpstream(bodyRec, account, live, blocked, fileCache)
           : bodyRec;
+      const ready =
+        skillSearch && filed && wire
+          ? routeSkillSearch(filed, upstreamHostsSearch(account.baseUrl, wire, account.hostedSearch), searchConfigured(env))
+          : filed;
       const mode: ThinkingMode = wire ? thinkingMode(picked.model, wire) : "unknown";
       if (wire === "chat" && ready) outbound = messagesToChat(ready, chatToolChoiceAny(account.baseUrl));
       else if (wire === "responses" && ready) {

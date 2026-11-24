@@ -14,7 +14,9 @@ description: >-
 
 通用 skill **只**挂在 `/v1/skill/*` 和 `/anthropic/v1/skill/*`。默认 `/v1/chat/completions`、`/v1/messages` 纯转发，不要往里面塞工具。
 
-启用列表在 KV（后台 `/admin/api/skills`），不要写进 `messagesWire` 的模型名前缀。Worker 自己执行 `web_search` / `fetch_url`。没有搜索 secret 就不挂 `web_search`。DeepSeek 请求里已有 `deepseek_web_search` / `deepseek_read_url` 时不重复挂。DeepSeek 会自己执行这两样，`prepareAnthropic` 要放行，别当未知服务端工具丢掉。
+启用列表在 KV（后台 `/admin/api/skills`），不要写进 `messagesWire` 的模型名前缀。Worker 自己执行 `web_search` / `fetch_url`。
+
+`web_search` 的执行方按上游决定，不按模型名：`/messages` 上网关先挂函数工具并给 proxy 一个内部头 `x-skill-search`，proxy 选定账号后（`routeSkillSearch`）——上游自己会搜（Responses 协议且 `hostedSearch`，不写时 xAI 和 OpenAI）就换成托管搜索，不占 Worker 的搜索 secret；否则有 `TAVILY_API_KEY` / `BRAVE_API_KEY` 就由 Worker 执行，都没有就丢掉工具和点名它的 `tool_choice`。`/chat/completions` 只能 Worker 执行，没有搜索 secret 就不挂。DeepSeek 请求里已有 `deepseek_web_search` / `deepseek_read_url` 时不重复挂。DeepSeek 会自己执行这两样，`prepareAnthropic` 要放行，别当未知服务端工具丢掉。
 
 用户自己的 MCP / Skill 也只挂在 `/v1/skill/*`，由网关做 MCP 客户端（`mcp.ts`）。兼容性在网关消化：配置格式、传输协议、协议版本、工具名和 schema 的差异都在这里处理，别让前端或模型去适配某个 MCP server。不要为某个具体的 MCP server 写分支。
 

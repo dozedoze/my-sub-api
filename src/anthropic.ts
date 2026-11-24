@@ -855,6 +855,84 @@ function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/** 思考阶段上游可能很久不吐字，没有字节时浏览器和中间代理会按空闲超时掐连接。 */
+const SSE_PING_MS = 10_000;
+const SSE_PING = sseEvent("ping", { type: "ping" });
+
+/**
+ * 上游 SSE -> Anthropic SSE 的统一泵。
+ * - 按需 pull，客户端读得慢时上游跟着慢，不在内存里堆。
+ * - 客户端断开（cancel）时取消上游读取。
+ * - 空闲时定时发 ping 保活。
+ * - 上游中途出错时发 Anthropic 的 error 事件再正常收尾，前端能看到原因，而不是笼统的「网络错误」。
+ */
+export function pumpSse(
+  source: ReadableStream<Uint8Array>,
+  handler: {
+    line(controller: ReadableStreamDefaultController<Uint8Array>, line: string): void;
+    end(controller: ReadableStreamDefaultController<Uint8Array>): void;
+  },
+  pingMs = SSE_PING_MS,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stop = () => {
+    if (timer !== undefined) clearInterval(timer);
+    timer = undefined;
+  };
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      timer = setInterval(() => {
+        try {
+          controller.enqueue(SSE_PING);
+        } catch {
+          stop();
+        }
+      }, pingMs);
+    },
+    async pull(controller) {
+      try {
+        // pull 结束时队列没增长就不会再被调用，所以一直读到产出了事件为止。
+        const before = controller.desiredSize ?? 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            if (buf) handler.line(controller, buf);
+            handler.end(controller);
+            stop();
+            controller.close();
+            return;
+          }
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? "";
+          for (const line of lines) handler.line(controller, line);
+          if ((controller.desiredSize ?? 0) < before) return;
+        }
+      } catch (err) {
+        stop();
+        try {
+          controller.enqueue(
+            sseEvent("error", {
+              type: "error",
+              error: { type: "api_error", message: err instanceof Error ? err.message : "Upstream stream interrupted" },
+            }),
+          );
+          controller.close();
+        } catch {
+          /* 控制器已关闭 */
+        }
+      }
+    },
+    cancel(reason) {
+      stop();
+      return reader.cancel(reason);
+    },
+  });
+}
+
 export function chatSseToAnthropic(stream: ReadableStream<Uint8Array>, model: string): ReadableStream<Uint8Array> {
   const state: SseState = {
     started: false,
@@ -871,8 +949,6 @@ export function chatSseToAnthropic(stream: ReadableStream<Uint8Array>, model: st
     cacheRead: 0,
     cacheWrite: 0,
   };
-  const decoder = new TextDecoder();
-  let buf = "";
   let thoughtIndex = -1;
 
   const closeThought = (controller: ReadableStreamDefaultController<Uint8Array>) => {
@@ -1037,28 +1113,7 @@ export function chatSseToAnthropic(stream: ReadableStream<Uint8Array>, model: st
     onData(controller, trimmed.slice(5).trim());
   };
 
-  return new ReadableStream({
-    async start(controller) {
-      const reader = stream.getReader();
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop() ?? "";
-          for (const line of lines) onLine(controller, line);
-        }
-        if (buf) onLine(controller, buf);
-        finish(controller);
-        controller.close();
-      } catch (err) {
-        controller.error(err);
-      } finally {
-        reader.releaseLock();
-      }
-    },
-  });
+  return pumpSse(stream, { line: onLine, end: finish });
 }
 
 export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, model: string): ReadableStream<Uint8Array> {
@@ -1077,8 +1132,6 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
     cacheRead: 0,
     cacheWrite: 0,
   };
-  const decoder = new TextDecoder();
-  let buf = "";
   let lastTool = -1;
   let reasoningItems: Record<string, unknown>[] = [];
   let reasoningSent = false;
@@ -1260,26 +1313,5 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
     if (!trimmed.startsWith("data:")) return;
     onData(controller, trimmed.slice(5).trim());
   };
-  return new ReadableStream({
-    async start(controller) {
-      const reader = stream.getReader();
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop() ?? "";
-          for (const line of lines) onLine(controller, line);
-        }
-        if (buf) onLine(controller, buf);
-        finish(controller);
-        controller.close();
-      } catch (err) {
-        controller.error(err);
-      } finally {
-        reader.releaseLock();
-      }
-    },
-  });
+  return pumpSse(stream, { line: onLine, end: finish });
 }

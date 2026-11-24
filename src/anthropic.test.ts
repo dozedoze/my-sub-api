@@ -11,6 +11,7 @@ import {
   messagesToResponses,
   messagesWire,
   prepareAnthropic,
+  pumpSse,
   relaxToolChoice,
   responsesSseToAnthropic,
   responsesToMessage,
@@ -269,6 +270,59 @@ test("chatToMessage maps tool calls", () => {
 test("chatErrorToAnthropic keeps the upstream message", () => {
   const err = chatErrorToAnthropic(404, { error: { message: "model grok-4.6 not found" } });
   assert.deepEqual(err, { type: "error", error: { type: "not_found_error", message: "model grok-4.6 not found" } });
+});
+
+test("pumpSse pings while upstream is silent and stops cleanly", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const source = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      await gate;
+      controller.close();
+    },
+  });
+  const reader = pumpSse(source, { line() {}, end() {} }, 10).getReader();
+  const dec = new TextDecoder();
+  const first = await reader.read();
+  assert.match(dec.decode(first.value), /^event: ping\n/);
+  release();
+  for (;;) {
+    const { done } = await reader.read();
+    if (done) break;
+  }
+});
+
+test("pumpSse cancel propagates to upstream", async () => {
+  let cancelled = false;
+  const source = new ReadableStream<Uint8Array>({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const reader = pumpSse(source, { line() {}, end() {} }, 1000).getReader();
+  await reader.cancel();
+  assert.equal(cancelled, true);
+});
+
+test("pumpSse turns an upstream failure into an anthropic error event", async () => {
+  const source = new ReadableStream<Uint8Array>({
+    pull() {
+      throw new Error("boom");
+    },
+  });
+  const reader = pumpSse(source, { line() {}, end() {} }, 1000).getReader();
+  const dec = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += dec.decode(value);
+  }
+  assert.match(out, /event: error/);
+  assert.match(out, /boom/);
 });
 
 test("chat sse becomes anthropic events", async () => {

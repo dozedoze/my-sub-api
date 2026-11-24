@@ -1137,7 +1137,14 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
   };
   let lastTool = -1;
   let reasoningItems: Record<string, unknown>[] = [];
-  let reasoningSent = false;
+  /** 已经随各自的 thinking 块下发过的 reasoning 项，收尾时只补没发过的 */
+  const sentReasoning = new Set<string>();
+  const reasoningKey = (item: Record<string, unknown>): string =>
+    typeof item.id === "string" && item.id ? item.id : String(item.encrypted_content ?? JSON.stringify(item));
+  /** 正在流式下发的 thinking 块索引，没有则 -1 */
+  let thinkIndex = -1;
+  let thinkStreamed = false;
+  let summaryIndex = -1;
 
   const rememberReasoning = (item: Record<string, unknown> | null) => {
     if (!item || item.type !== "reasoning") return;
@@ -1175,25 +1182,72 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
     controller.enqueue(sseEvent("content_block_stop", { type: "content_block_stop", index: state.textIndex }));
     state.textIndex = -1;
   };
-  const emitReasoning = (controller: ReadableStreamDefaultController<Uint8Array>) => {
-    if (reasoningSent || !reasoningItems.length) return;
-    reasoningSent = true;
-    const index = state.next++;
-    controller.enqueue(
-      sseEvent("content_block_start", {
-        type: "content_block_start",
-        index,
-        content_block: { type: "thinking", thinking: thinkingText(reasoningItems) },
-      }),
-    );
+  /** 思考增量立刻下发：thinking 块必须排在正文前面，客户端才能边收边渲染成思考区。 */
+  const streamThinking = (controller: ReadableStreamDefaultController<Uint8Array>, text: string, part: number) => {
+    if (!text) return;
+    ensureStart(controller);
+    closeText(controller);
+    if (thinkIndex < 0) {
+      thinkIndex = state.next++;
+      summaryIndex = part;
+      controller.enqueue(
+        sseEvent("content_block_start", {
+          type: "content_block_start",
+          index: thinkIndex,
+          content_block: { type: "thinking", thinking: "" },
+        }),
+      );
+    }
+    // 多段摘要之间补一个段落分隔
+    const gap = thinkStreamed && part !== summaryIndex ? "\n\n" : "";
+    summaryIndex = part;
+    thinkStreamed = true;
     controller.enqueue(
       sseEvent("content_block_delta", {
         type: "content_block_delta",
-        index,
-        delta: { type: "signature_delta", signature: packReasoning(reasoningItems) },
+        index: thinkIndex,
+        delta: { type: "thinking_delta", thinking: gap + text },
       }),
     );
+  };
+  /** 收束当前 thinking 块；items 给出就带上签名，用于回传上游。块没开过（上游没流式给摘要）就一次性发出。 */
+  const closeThinking = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    items: Record<string, unknown>[] = [],
+  ) => {
+    if (thinkIndex < 0 && !items.length) return;
+    let index = thinkIndex;
+    if (index < 0) {
+      ensureStart(controller);
+      closeText(controller);
+      index = state.next++;
+      controller.enqueue(
+        sseEvent("content_block_start", {
+          type: "content_block_start",
+          index,
+          content_block: { type: "thinking", thinking: thinkingText(items) },
+        }),
+      );
+    }
+    if (items.length) {
+      controller.enqueue(
+        sseEvent("content_block_delta", {
+          type: "content_block_delta",
+          index,
+          delta: { type: "signature_delta", signature: packReasoning(items) },
+        }),
+      );
+      for (const item of items) sentReasoning.add(reasoningKey(item));
+    }
     controller.enqueue(sseEvent("content_block_stop", { type: "content_block_stop", index }));
+    thinkIndex = -1;
+    thinkStreamed = false;
+    summaryIndex = -1;
+  };
+  /** 兜底：上游没按项给 reasoning（只在 completed 里一次性给）时，在收尾补发没发过的。 */
+  const emitReasoning = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    const pending = reasoningItems.filter((item) => !sentReasoning.has(reasoningKey(item)));
+    closeThinking(controller, pending);
   };
   const finish = (controller: ReadableStreamDefaultController<Uint8Array>) => {
     if (state.closed) return;
@@ -1240,8 +1294,23 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
     if (json.type === "response.output_item.added" || json.type === "response.output_item.done") {
       rememberReasoning(asRecord(json.item));
     }
+    if (
+      (json.type === "response.reasoning_summary_text.delta" || json.type === "response.reasoning_text.delta") &&
+      typeof json.delta === "string"
+    ) {
+      streamThinking(controller, json.delta, num(json.summary_index) ?? 0);
+      return;
+    }
+    if (json.type === "response.output_item.done") {
+      const item = asRecord(json.item);
+      if (item?.type === "reasoning") {
+        closeThinking(controller, [item]);
+        return;
+      }
+    }
     if (json.type === "response.output_text.delta" && typeof json.delta === "string" && json.delta) {
       ensureStart(controller);
+      closeThinking(controller);
       if (state.textIndex < 0) {
         state.textIndex = state.next++;
         controller.enqueue(
@@ -1265,6 +1334,7 @@ export function responsesSseToAnthropic(stream: ReadableStream<Uint8Array>, mode
       const item = asRecord(json.item);
       if (item?.type !== "function_call") return;
       ensureStart(controller);
+      closeThinking(controller);
       closeText(controller);
       const toolIndex = num(json.output_index) ?? state.next;
       const block = state.next++;

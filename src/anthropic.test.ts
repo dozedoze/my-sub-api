@@ -665,6 +665,67 @@ test("responses sse becomes anthropic events", async () => {
   ]);
 });
 
+async function collectResponsesSse(raw: string): Promise<{ event: string; data: Record<string, unknown> }[]> {
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(enc.encode(raw));
+      controller.close();
+    },
+  });
+  const reader = responsesSseToAnthropic(stream, "grok-4.7").getReader();
+  const dec = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += dec.decode(value);
+  }
+  return out
+    .split("\n\n")
+    .filter(Boolean)
+    .map((block) => {
+      const lines = block.split("\n");
+      const event = lines.find((line) => line.startsWith("event:"))?.slice(6).trim() ?? "";
+      const data = JSON.parse(lines.find((line) => line.startsWith("data:"))?.slice(5) ?? "{}") as Record<string, unknown>;
+      return { event, data };
+    });
+}
+
+test("responses reasoning streams as a thinking block before the text", async () => {
+  const item = { type: "reasoning", id: "rs_1", encrypted_content: "cipher", summary: [{ type: "summary_text", text: "想一想" }] };
+  const raw = [
+    'data: {"type":"response.created","response":{"id":"r1","model":"grok-4.7"}}\n\n',
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}\n\n',
+    'data: {"type":"response.reasoning_summary_text.delta","summary_index":0,"delta":"想"}\n\n',
+    'data: {"type":"response.reasoning_summary_text.delta","summary_index":0,"delta":"一想"}\n\n',
+    `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item })}\n\n`,
+    'data: {"type":"response.output_text.delta","delta":"Hi"}\n\n',
+    `data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", output: [item], usage: { input_tokens: 1, output_tokens: 2 } } })}\n\n`,
+  ].join("");
+  const events = await collectResponsesSse(raw);
+  const blocks = events
+    .filter((e) => e.event === "content_block_start")
+    .map((e) => (e.data.content_block as { type: string }).type);
+  assert.deepEqual(blocks, ["thinking", "text"]);
+  const deltas = events.filter((e) => e.event === "content_block_delta").map((e) => (e.data.delta as { type: string }).type);
+  assert.deepEqual(deltas, ["thinking_delta", "thinking_delta", "signature_delta", "text_delta"]);
+  assert.equal(events.filter((e) => e.event === "content_block_start").length, 2);
+  assert.equal(events.at(-1)?.event, "message_stop");
+});
+
+test("responses reasoning without stream events is still sent once at the end", async () => {
+  const raw = [
+    'data: {"type":"response.output_text.delta","delta":"Hi"}\n\n',
+    'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_1","encrypted_content":"c"}]}}\n\n',
+  ].join("");
+  const events = await collectResponsesSse(raw);
+  const blocks = events
+    .filter((e) => e.event === "content_block_start")
+    .map((e) => (e.data.content_block as { type: string }).type);
+  assert.deepEqual(blocks, ["text", "thinking"]);
+});
+
 test("file_id is inlined to base64 then converted for chat and grok", () => {
   const body = {
     model: "grok-4.7",
